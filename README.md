@@ -101,10 +101,9 @@ Open [http://localhost:8000](http://localhost:8000) in your browser.
 
 ### 7. Default login credentials
 
-| Role   | Email              | Password  |
-|--------|--------------------|-----------|
-| Admin  | admin@example.com  | password  |
-| Officer| officer@example.com| password  |
+| Role         | Email                     | Password |
+|--------------|---------------------------|----------|
+| System Admin | system.admin@edms.gov.mw  | password |
 
 ---
 
@@ -113,10 +112,3 @@ Open [http://localhost:8000](http://localhost:8000) in your browser.
 - Rebuild frontend after changes: `npm run dev` (watch) or `npm run build`
 - Run tests: `php artisan test`
 - Code style: `./vendor/bin/pint`
-
-DB_CONNECTION=mysql
-DB_HOST=dbweb.boma.gov.mw
-DB_PORT=3306
-DB_DATABASE=ogp_website_demo_dbs
-DB_USERNAME=demo_dbuser
-DB_PASSWORD=BtZlzhfBh287tD0
