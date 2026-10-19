@@ -44,6 +44,18 @@ return [
             'after_commit' => false,
         ],
 
+        // Dedicated connection for large-file assembly. Concatenating a 10 GB
+        // upload can run far longer than the default 90s retry_after, which
+        // would otherwise re-deliver a job that is still running.
+        'uploads' => [
+            'driver' => env('UPLOAD_QUEUE_DRIVER', 'database'),
+            'connection' => env('DB_QUEUE_CONNECTION'),
+            'table' => env('DB_QUEUE_TABLE', 'jobs'),
+            'queue' => env('UPLOAD_QUEUE', 'uploads'),
+            'retry_after' => (int) env('UPLOAD_QUEUE_RETRY_AFTER', 3600),
+            'after_commit' => true,
+        ],
+
         'beanstalkd' => [
             'driver' => 'beanstalkd',
             'host' => env('BEANSTALKD_QUEUE_HOST', 'localhost'),

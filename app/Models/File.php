@@ -15,6 +15,7 @@ class File extends Model
     protected $fillable = [
         'storage_space_id',
         'folder_id',
+        'upload_session_id',
         'created_by',
         'name',
         'mime_type',
@@ -60,6 +61,11 @@ class File extends Model
     public function versions(): HasMany
     {
         return $this->hasMany(FileVersion::class)->orderByDesc('version');
+    }
+
+    public function uploadSession(): BelongsTo
+    {
+        return $this->belongsTo(UploadSession::class);
     }
 
     public function shares(): HasMany
