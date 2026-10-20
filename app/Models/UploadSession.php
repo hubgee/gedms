@@ -15,11 +15,17 @@ use Illuminate\Support\Str;
 class UploadSession extends Model
 {
     public const STATUS_PENDING = 'pending';
+
     public const STATUS_UPLOADING = 'uploading';
+
     public const STATUS_ASSEMBLING = 'assembling';
+
     public const STATUS_COMPLETED = 'completed';
+
     public const STATUS_FAILED = 'failed';
+
     public const STATUS_EXPIRED = 'expired';
+
     public const STATUS_CANCELLED = 'cancelled';
 
     protected $fillable = [

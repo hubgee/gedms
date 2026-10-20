@@ -2,31 +2,20 @@
 
 namespace Tests\Feature\Uploads;
 
-use App\Models\StorageSpace;
 use App\Models\UploadChunk;
 use App\Models\UploadSession;
-use App\Models\User;
 use Illuminate\Database\QueryException;
-use Illuminate\Foundation\Testing\RefreshDatabase;
-use Tests\TestCase;
 
 /**
  * Phase 1 sanity checks: the resumable-upload tables exist, the models default
  * correctly, and the chunk index is unique per session.
  */
-class UploadSchemaTest extends TestCase
+class UploadSchemaTest extends UploadTestCase
 {
-    use RefreshDatabase;
-
     private function makeSession(array $attributes = []): UploadSession
     {
-        $user = User::factory()->create();
-        $space = StorageSpace::create([
-            'type' => StorageSpace::TYPE_PERSONAL,
-            'owner_user_id' => $user->id,
-            'name' => 'Personal',
-            'is_active' => true,
-        ]);
+        $user = $this->makeUser();
+        $space = $this->makePersonalSpace($user);
 
         return UploadSession::create(array_merge([
             'user_id' => $user->id,
@@ -55,7 +44,7 @@ class UploadSchemaTest extends TestCase
 
     public function test_new_session_defaults_to_pending_before_persisting(): void
     {
-        $session = new UploadSession();
+        $session = new UploadSession;
 
         $this->assertSame(UploadSession::STATUS_PENDING, $session->status);
         $this->assertNull($session->uuid);

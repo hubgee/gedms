@@ -600,7 +600,7 @@ class FileService
         return sprintf('%s/%s/v%d.%s', $space->id, $file->uuid, $version, $ext);
     }
 
-    protected function sanitizeFileName(string $name): string
+    public function sanitizeFileName(string $name): string
     {
         return Str::limit(preg_replace('/[^\p{L}\p{N}\s._-]/u', '', $name) ?: 'file', 255);
     }
@@ -655,6 +655,16 @@ class FileService
         }
         $section = $space->ownerSection;
         return $section ? $section->getMandatoryFolderNames() : [];
+    }
+
+    /**
+     * Public entry point for the create-file rules, so the resumable upload flow
+     * can enforce exactly the same placement policy before a single byte lands
+     * (see {@see UploadService::init()}).
+     */
+    public function assertCanUploadTo(StorageSpace $space, ?Folder $folder, User $user): void
+    {
+        $this->enforceMandatoryFolderRestriction($space, $folder, $user, 'upload files');
     }
 
     protected function enforceMandatoryFolderRestriction(StorageSpace $space, ?Folder $parent, User $user, string $action): void
