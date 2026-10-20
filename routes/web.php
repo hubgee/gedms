@@ -14,6 +14,7 @@ use App\Http\Controllers\MemoController;
 use App\Http\Controllers\FolderController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\SearchController;
+use App\Http\Controllers\UploadController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -96,6 +97,16 @@ Route::middleware('auth')->group(function () {
         Route::get('/{file}/comments', [FileController::class, 'comments'])->name('comments.index')->withTrashed();
         Route::post('/{file}/comments', [FileController::class, 'storeComment'])->name('comments.store');
         Route::post('/{file}/tags', [FileController::class, 'syncTags'])->name('tags.sync');
+    });
+
+    Route::prefix('uploads')->name('uploads.')->group(function () {
+        Route::post('/', [UploadController::class, 'store'])->name('store');
+        Route::get('/{uuid}', [UploadController::class, 'show'])->whereUuid('uuid')->name('show');
+        Route::put('/{uuid}/chunks/{index}', [UploadController::class, 'chunk'])
+            ->whereUuid('uuid')
+            ->whereNumber('index')
+            ->name('chunks.store');
+        Route::delete('/{uuid}', [UploadController::class, 'destroy'])->whereUuid('uuid')->name('destroy');
     });
 
     Route::prefix('documents')->name('documents.')->group(function () {

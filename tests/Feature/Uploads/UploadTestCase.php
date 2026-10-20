@@ -17,6 +17,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
+use Spatie\Permission\Models\Permission;
 use Tests\TestCase;
 
 /**
@@ -55,6 +56,17 @@ abstract class UploadTestCase extends TestCase
     protected function makeUser(): User
     {
         return User::factory()->create();
+    }
+
+    /** A user allowed through the `can:create-files` gate. */
+    protected function makeUploader(): User
+    {
+        $user = $this->makeUser();
+
+        Permission::findOrCreate('create-files', 'web');
+        $user->givePermissionTo('create-files');
+
+        return $user;
     }
 
     protected function makePersonalSpace(User $user): StorageSpace
