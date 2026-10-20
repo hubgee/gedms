@@ -2,8 +2,10 @@
 
 namespace App\Providers;
 
+use App\Contracts\UploadStorage;
 use App\Listeners\LogLogout;
 use App\Listeners\LogSuccessfulLogin;
+use App\Services\Uploads\LocalUploadStorage;
 use Illuminate\Auth\Events\Login;
 use Illuminate\Auth\Events\Logout;
 use Illuminate\Support\Facades\Event;
@@ -14,7 +16,7 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        //
+        $this->app->bind(UploadStorage::class, LocalUploadStorage::class);
     }
 
     public function boot(): void

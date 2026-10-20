@@ -29,7 +29,7 @@
                 Folder
             </button>
         </form>
-        <form action="{{ route('files.store') }}" method="POST" enctype="multipart/form-data" class="inline" id="upload-form">
+        <form action="{{ route('files.store') }}" method="POST" enctype="multipart/form-data" class="inline" id="upload-form" data-chunked-upload>
             @csrf
             <input type="hidden" name="space_id" value="{{ $space->id }}">
             <input type="hidden" name="folder_id" value="{{ $folder?->id }}">
@@ -39,6 +39,7 @@
                 Upload
             </button>
         </form>
+        <p class="text-[11px] text-slate-500 mt-1">Large files upload in resumable chunks; the transfer survives a reload.</p>
         @endif
     </div>
 </div>

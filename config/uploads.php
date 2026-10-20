@@ -23,7 +23,7 @@ return [
     | (config/queue.php) whose retry_after is deliberately long, so a worker is
     | never interrupted mid-concatenation. Run it with:
     |
-    |   php artisan queue:work --queue=uploads,default
+    |   php artisan queue:work --connection=uploads --queue=uploads --timeout=3600
     |
     */
 

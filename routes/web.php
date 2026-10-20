@@ -106,6 +106,9 @@ Route::middleware('auth')->group(function () {
             ->whereUuid('uuid')
             ->whereNumber('index')
             ->name('chunks.store');
+        Route::post('/{uuid}/complete', [UploadController::class, 'complete'])
+            ->whereUuid('uuid')
+            ->name('complete');
         Route::delete('/{uuid}', [UploadController::class, 'destroy'])->whereUuid('uuid')->name('destroy');
     });
 

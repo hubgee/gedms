@@ -2,19 +2,20 @@
 
 namespace App\Services;
 
+use App\Contracts\UploadStorage;
+use App\Jobs\AssembleUpload;
 use App\Models\Folder;
 use App\Models\StorageSpace;
 use App\Models\UploadChunk;
 use App\Models\UploadSession;
 use App\Models\User;
-use Illuminate\Filesystem\FilesystemAdapter;
+use App\Services\Uploads\UploadIncompleteException;
+use App\Services\Uploads\UploadVerificationException;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Number;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
-use League\Flysystem\Local\LocalFilesystemAdapter;
 use RuntimeException;
 
 /**
@@ -24,15 +25,16 @@ use RuntimeException;
  * request, power cut, disk loss):
  *
  *  - a chunk is streamed to "{index}.chunk.part" and only renamed to
- *    "{index}.chunk" once it is complete, and rename() is atomic within a
- *    filesystem, so a crash can never leave a partial chunk that looks finished;
+ *    "{index}.chunk" once it is complete and fsync'd, so a crash can never
+ *    leave a partial chunk that looks finished;
  *  - the chunk row is inserted only after the bytes are durable on disk;
  *  - every resume reconciles the index against the disk, so lost or truncated
- *    bytes are reported missing and simply re-sent by the client.
+ *    bytes are reported missing and simply re-sent by the client;
+ *  - assembly is idempotent and only publishes File/FileVersion rows in the
+ *    same transaction in which the session is marked completed.
  *
- * Chunk bytes live on the "edms" disk under tmp/{session-uuid}. That disk must
- * use the local driver, because both the atomic rename and the later streamed
- * concatenation require real filesystem paths.
+ * Byte handling is delegated to the UploadStorage contract, so the local disk
+ * can later be replaced by object storage without touching this class.
  */
 class UploadService
 {
@@ -40,6 +42,7 @@ class UploadService
         protected SpaceService $spaceService,
         protected FileService $fileService,
         protected AuditService $auditService,
+        protected UploadStorage $storage,
     ) {}
 
     /**
@@ -161,7 +164,11 @@ class UploadService
             ]);
         }
 
-        $this->writeChunkAtomically($chunk->getRealPath(), $this->chunkPath($session, $index), $sha256);
+        try {
+            $this->storage->putChunk($this->chunkPath($session, $index), $chunk->getRealPath(), $sha256);
+        } catch (RuntimeException $e) {
+            throw ValidationException::withMessages(['chunk' => $e->getMessage()]);
+        }
 
         DB::transaction(function () use ($session, $index, $actualBytes, $sha256) {
             UploadChunk::upsert(
@@ -184,6 +191,173 @@ class UploadService
         });
 
         return $session->fresh();
+    }
+
+    /**
+     * Finalise an upload: check that every chunk is present, claim the session
+     * and queue the assembly.
+     *
+     * The claim is a conditional UPDATE, so two concurrent "complete" requests
+     * cannot both queue an assembly job.
+     */
+    public function complete(UploadSession $session, User $user): UploadSession
+    {
+        $this->authorizeSession($session, $user);
+
+        if ($session->isCompleted() || $session->status === UploadSession::STATUS_ASSEMBLING) {
+            return $session;
+        }
+
+        if (! in_array($session->status, [UploadSession::STATUS_PENDING, UploadSession::STATUS_UPLOADING], true)) {
+            throw ValidationException::withMessages([
+                'upload' => "This upload is {$session->status} and cannot be completed.",
+            ]);
+        }
+
+        if ($session->isExpired()) {
+            $this->expire($session);
+
+            throw ValidationException::withMessages([
+                'upload' => 'This upload has expired. Please start it again.',
+            ]);
+        }
+
+        $session = $this->reconcileChunks($session);
+
+        $missing = $session->missingChunkIndexes();
+        if ($missing !== []) {
+            throw ValidationException::withMessages([
+                'upload' => 'The upload is incomplete: '.count($missing).' of '.$session->total_chunks.' chunks are missing.',
+            ]);
+        }
+
+        $claimed = UploadSession::query()
+            ->whereKey($session->id)
+            ->whereIn('status', [UploadSession::STATUS_PENDING, UploadSession::STATUS_UPLOADING])
+            ->update([
+                'status' => UploadSession::STATUS_ASSEMBLING,
+                'failure_reason' => null,
+            ]);
+
+        if ($claimed === 0) {
+            return $session->fresh();
+        }
+
+        AssembleUpload::dispatch($session->id);
+
+        return $session->fresh();
+    }
+
+    /**
+     * Assemble the chunks into the final file and publish it.
+     *
+     * Called by {@see AssembleUpload}; safe to run more than once. The final
+     * path and the File UUID are derived from the session UUID, so a retry
+     * reuses the same destination instead of scattering orphan copies.
+     */
+    public function assemble(UploadSession $session): void
+    {
+        if (in_array($session->status, [
+            UploadSession::STATUS_COMPLETED,
+            UploadSession::STATUS_CANCELLED,
+            UploadSession::STATUS_EXPIRED,
+            UploadSession::STATUS_FAILED,
+        ], true)) {
+            return;
+        }
+
+        $session = $this->reconcileChunks($session);
+
+        $this->assertDestinationStillValid($session);
+
+        $missing = $session->missingChunkIndexes();
+        if ($missing !== []) {
+            // Bytes vanished between "complete" and assembly. Put the session
+            // back so the client re-sends only those chunks.
+            $session->forceFill(['status' => UploadSession::STATUS_UPLOADING])->save();
+
+            throw new UploadIncompleteException($session, $missing);
+        }
+
+        $fileUuid = $session->uuid;
+        $storagePath = $this->fileService->buildStoragePathFor(
+            $session->storageSpace,
+            $fileUuid,
+            1,
+            $session->name,
+        );
+
+        $sources = array_map(
+            fn (int $index) => $this->chunkPath($session, $index),
+            range(0, (int) $session->total_chunks - 1),
+        );
+
+        $this->storage->assemble(
+            $storagePath,
+            $sources,
+            (int) $session->total_bytes,
+            $session->sha256,
+        );
+
+        $absolutePath = $this->storage->localPath($storagePath);
+
+        try {
+            $this->assertNoExecutablePayload($absolutePath);
+        } catch (UploadVerificationException $e) {
+            $this->storage->delete($storagePath);
+
+            throw $e;
+        }
+
+        $mimeType = $this->detectMimeType($absolutePath) ?: ($session->mime_type ?: 'application/octet-stream');
+
+        DB::transaction(function () use ($session, $fileUuid, $storagePath, $mimeType) {
+            $file = $this->fileService->publishAssembled(
+                $session->storageSpace,
+                $session->folder,
+                $session->user,
+                $fileUuid,
+                $storagePath,
+                $session->name,
+                $mimeType,
+                (int) $session->total_bytes,
+                (int) $session->id,
+            );
+
+            $session->forceFill([
+                'status' => UploadSession::STATUS_COMPLETED,
+                'file_id' => $file->id,
+                'failure_reason' => null,
+            ])->save();
+        });
+
+        $this->storage->deleteDirectory($this->temporaryDirectory($session));
+
+        $this->auditService->log('upload.completed', UploadSession::class, $session->id, null, [
+            'file_id' => $session->file_id,
+            'name' => $session->name,
+            'space_id' => $session->storage_space_id,
+            'declared_mime' => $session->mime_type,
+            'detected_mime' => $mimeType,
+        ]);
+    }
+
+    /** Record a terminal failure. Idempotent; completed sessions are left alone. */
+    public function fail(UploadSession $session, string $reason): void
+    {
+        if ($session->isCompleted() || $session->status === UploadSession::STATUS_FAILED) {
+            return;
+        }
+
+        $session->forceFill([
+            'status' => UploadSession::STATUS_FAILED,
+            'failure_reason' => Str::limit($reason, 250),
+        ])->save();
+
+        $this->auditService->log('upload.failed', UploadSession::class, $session->id, null, [
+            'name' => $session->name,
+            'reason' => $reason,
+        ]);
     }
 
     /**
@@ -277,13 +451,12 @@ class UploadService
      */
     public function reconcileChunks(UploadSession $session): UploadSession
     {
-        $disk = $this->disk();
         $receivedBytes = 0;
         $dirty = false;
 
         foreach ($session->chunks()->get() as $chunk) {
             $path = $this->chunkPath($session, (int) $chunk->chunk_index);
-            $onDisk = $disk->exists($path) ? (int) $disk->size($path) : 0;
+            $onDisk = $this->storage->exists($path) ? (int) $this->storage->size($path) : 0;
 
             if ($onDisk !== (int) $chunk->bytes) {
                 $chunk->delete();
@@ -329,62 +502,66 @@ class UploadService
     }
 
     /**
-     * Stream the uploaded chunk to a ".part" file, optionally verify its hash,
-     * then rename it into place. The rename is atomic on the same filesystem, so
-     * an interrupted write can never leave a chunk that looks complete.
+     * Re-check at assembly time that the destination is still usable: the user
+     * may have lost access and the folder may have been deleted while the
+     * upload was in flight.
      */
-    protected function writeChunkAtomically(string $sourcePath, string $destination, ?string $expectedSha256): void
+    protected function assertDestinationStillValid(UploadSession $session): void
     {
-        $this->disk()->makeDirectory(dirname($destination));
-        $partPath = $this->localPath($destination.'.part');
-        $finalPath = $this->localPath($destination);
-
-        $source = @fopen($sourcePath, 'rb');
-        $target = @fopen($partPath, 'wb');
-
-        if ($source === false || $target === false) {
-            is_resource($source) && fclose($source);
-            is_resource($target) && fclose($target);
-            @unlink($partPath);
-
-            throw ValidationException::withMessages(['chunk' => 'Unable to store the chunk on disk.']);
+        if ($session->user === null) {
+            throw new UploadVerificationException('The uploading user no longer exists.');
         }
 
-        $copied = false;
-        try {
-            $copied = stream_copy_to_stream($source, $target) !== false;
-            fflush($target);
-        } finally {
-            fclose($source);
-            fclose($target);
+        if (! $this->spaceService->userCanAccess($session->storageSpace, $session->user)) {
+            throw new UploadVerificationException('The uploading user no longer has access to the destination space.');
         }
 
-        if (! $copied) {
-            @unlink($partPath);
+        if ($session->folder_id !== null && $session->folder === null) {
+            throw new UploadVerificationException('The destination folder no longer exists.');
+        }
+    }
 
-            throw ValidationException::withMessages(['chunk' => 'Unable to store the chunk on disk.']);
+    /**
+     * Refuse PHP payloads. Stored files live outside the web root and are served
+     * through a controller, but rejecting executable content here removes the
+     * whole "uploaded script gets executed" class of bug for good.
+     */
+    protected function assertNoExecutablePayload(?string $absolutePath): void
+    {
+        if ($absolutePath === null) {
+            return;
         }
 
-        if ($expectedSha256 !== null) {
-            $actualSha256 = hash_file('sha256', $partPath);
+        $handle = @fopen($absolutePath, 'rb');
 
-            if (! is_string($actualSha256) || ! hash_equals(strtolower($expectedSha256), $actualSha256)) {
-                @unlink($partPath);
-
-                throw ValidationException::withMessages(['chunk' => 'The chunk failed its integrity check.']);
-            }
+        if ($handle === false) {
+            throw new RuntimeException('The assembled file is not readable.');
         }
 
-        if (! @rename($partPath, $finalPath)) {
-            @unlink($partPath);
+        $head = fread($handle, 512) ?: '';
+        fclose($handle);
 
-            throw ValidationException::withMessages(['chunk' => 'Unable to finalise the chunk on disk.']);
+        $head = ltrim($head, "\xEF\xBB\xBF \t\r\n");
+
+        if (str_starts_with($head, '<?php') || str_starts_with($head, '<?=')) {
+            throw new UploadVerificationException('The file contains executable PHP code and cannot be stored.');
         }
+    }
+
+    protected function detectMimeType(?string $absolutePath): ?string
+    {
+        if ($absolutePath === null || ! is_readable($absolutePath)) {
+            return null;
+        }
+
+        $detected = (new \finfo(FILEINFO_MIME_TYPE))->file($absolutePath);
+
+        return is_string($detected) && $detected !== '' ? $detected : null;
     }
 
     protected function deleteTemporaryFiles(UploadSession $session): void
     {
-        $this->disk()->deleteDirectory($this->temporaryDirectory($session));
+        $this->storage->deleteDirectory($this->temporaryDirectory($session));
     }
 
     protected function acceptsChunks(UploadSession $session): bool
@@ -414,26 +591,5 @@ class UploadService
         if ((int) $session->user_id !== $user->id) {
             abort(403);
         }
-    }
-
-    protected function disk(): FilesystemAdapter
-    {
-        return Storage::disk('edms');
-    }
-
-    /**
-     * Real filesystem path for a file on the edms disk. Resumable uploads need
-     * atomic renames and streamed concatenation, both of which require the local
-     * driver — fail loudly rather than writing to a meaningless path.
-     */
-    protected function localPath(string $path): string
-    {
-        $disk = $this->disk();
-
-        if (! $disk->getAdapter() instanceof LocalFilesystemAdapter) {
-            throw new RuntimeException('The [edms] disk must use the local driver for resumable uploads.');
-        }
-
-        return $disk->path($path);
     }
 }

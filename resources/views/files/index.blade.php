@@ -9,6 +9,17 @@
 
     <div class="space-y-4" x-data="driveManager({{ json_encode(['favoritedIds' => $favoritedIds ?? [], 'initialFileData' => $initialFileData ?? null]) }})"
          x-init="if (initialFileData) { selectFile(initialFileData); }">
+
+        {{-- Endpoint contract for resources/js/uploads.js. URLs come from the
+             router so the app keeps working in a subdirectory. --}}
+        <div id="gedms-upload-config" class="hidden"
+             data-endpoint="{{ route('uploads.store') }}"
+             data-session-template="{{ route('uploads.show', '__UUID__') }}"
+             data-chunk-template="{{ route('uploads.chunks.store', ['uuid' => '__UUID__', 'index' => '__INDEX__']) }}"
+             data-complete-template="{{ route('uploads.complete', '__UUID__') }}"
+             data-chunk-bytes="{{ config('uploads.chunk_bytes') }}"
+             data-concurrency="{{ config('uploads.concurrency') }}"
+             data-max-bytes="{{ config('uploads.max_bytes') }}"></div>
         @if (session('success'))
             <div class="card card-body bg-emerald-50 border-emerald-200 text-emerald-800">{{ session('success') }}</div>
         @endif
@@ -79,11 +90,8 @@
     </div>
 
     <script>
-        document.getElementById('file-input')?.addEventListener('change', function() {
-            if (this.files.length) {
-                document.getElementById('upload-form').submit();
-            }
-        });
+        {{-- Upload forms are wired by resources/js/uploads.js (forms marked
+             data-chunked-upload), which attaches change/submit handlers. --}}
         document.addEventListener('alpine:init', () => {
             Alpine.data('driveManager', (props = {}) => ({
                 selectedFile: null,
@@ -145,12 +153,23 @@
                         return;
                     }
                     const files = e.dataTransfer.files;
-                    if (files && files.length) {
-                        const input = document.getElementById('drop-file-input');
-                        const dt = new DataTransfer();
-                        dt.items.add(files[0]);
-                        input.files = dt.files;
-                        document.getElementById('drop-upload-form').submit();
+                    const form = document.getElementById('drop-upload-form');
+                    if (files && files.length && form) {
+                        // Route dropped files through the chunked uploader. It
+                        // uploads into the folder that was dropped on, which is
+                        // what people expect when they drop on a sub-folder row.
+                        if (window.GedmsUploads && targetSpaceId) {
+                            window.GedmsUploads.upload(files, {
+                                spaceId: targetSpaceId,
+                                folderId: targetFolderId || null,
+                            });
+                        } else {
+                            const input = document.getElementById('drop-file-input');
+                            const dt = new DataTransfer();
+                            dt.items.add(files[0]);
+                            input.files = dt.files;
+                            form.submit();
+                        }
                     }
                 },
                 toggleAll(e) {

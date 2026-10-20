@@ -2,9 +2,12 @@
 
 namespace Tests\Feature\Uploads;
 
+use App\Jobs\AssembleUpload;
+use App\Models\File;
 use App\Models\StorageSpace;
 use App\Models\UploadSession;
 use App\Models\User;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 
 /**
@@ -227,6 +230,92 @@ class UploadEndpointTest extends UploadTestCase
         $this->putChunk($user, $session, 1, 8, 1)
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['upload']);
+    }
+
+    public function test_complete_queues_the_assembly_job(): void
+    {
+        Queue::fake();
+
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->uploadAllChunks($user, $this->beginUpload($user, $space, null, 20));
+
+        $this->actingAs($user)
+            ->postJson(route('uploads.complete', $session->uuid))
+            ->assertOk()
+            ->assertJsonPath('status', UploadSession::STATUS_ASSEMBLING);
+
+        Queue::assertPushed(
+            AssembleUpload::class,
+            fn (AssembleUpload $job) => $job->uploadSessionId === $session->id,
+        );
+
+        // The assembly must not share the default queue: its retry_after and
+        // timeout are sized for multi-gigabyte concatenation.
+        $job = Queue::pushed(AssembleUpload::class)->first();
+        $this->assertSame('uploads', $job->connection);
+        $this->assertSame('uploads', $job->queue);
+    }
+
+    public function test_complete_rejects_an_incomplete_upload(): void
+    {
+        Queue::fake();
+
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->beginUpload($user, $space, null, 20);
+        $this->putChunk($user, $session, 0, 8, 0)->assertOk();
+
+        $this->actingAs($user)
+            ->postJson(route('uploads.complete', $session->uuid))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['upload']);
+
+        Queue::assertNothingPushed();
+        $this->assertSame(UploadSession::STATUS_UPLOADING, $session->fresh()->status);
+    }
+
+    public function test_complete_is_idempotent(): void
+    {
+        Queue::fake();
+
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->uploadAllChunks($user, $this->beginUpload($user, $space, null, 20));
+
+        $this->actingAs($user)->postJson(route('uploads.complete', $session->uuid))->assertOk();
+        $this->actingAs($user)->postJson(route('uploads.complete', $session->uuid))->assertOk();
+
+        Queue::assertPushed(AssembleUpload::class, 1);
+    }
+
+    public function test_complete_assembles_the_file_with_the_synchronous_queue(): void
+    {
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->uploadAllChunks($user, $this->beginUpload($user, $space, null, 20));
+
+        $this->actingAs($user)
+            ->postJson(route('uploads.complete', $session->uuid))
+            ->assertOk()
+            ->assertJsonPath('status', UploadSession::STATUS_COMPLETED)
+            ->assertJsonPath('received_bytes', 20);
+
+        $this->assertSame(1, File::query()->count());
+        $this->assertTrue(
+            $this->edmsDisk()->exists("{$session->storage_space_id}/{$session->uuid}/v1.bin"),
+        );
+    }
+
+    public function test_complete_is_owner_only(): void
+    {
+        $owner = $this->makeUploader();
+        $space = $this->makePersonalSpace($owner);
+        $session = $this->uploadAllChunks($owner, $this->beginUpload($owner, $space, null, 20));
+
+        $this->actingAs($this->makeUploader())
+            ->postJson(route('uploads.complete', $session->uuid))
+            ->assertForbidden();
     }
 
     /** @return array<string, mixed> */

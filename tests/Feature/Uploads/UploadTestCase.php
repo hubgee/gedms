@@ -64,7 +64,8 @@ abstract class UploadTestCase extends TestCase
         $user = $this->makeUser();
 
         Permission::findOrCreate('create-files', 'web');
-        $user->givePermissionTo('create-files');
+        Permission::findOrCreate('view-files', 'web');
+        $user->givePermissionTo(['create-files', 'view-files']);
 
         return $user;
     }
@@ -135,6 +136,50 @@ abstract class UploadTestCase extends TestCase
             $totalBytes,
             $fingerprint,
         );
+    }
+
+    /** Send every chunk of a session, using this fixture's deterministic content. */
+    protected function uploadAllChunks(User $user, UploadSession $session): UploadSession
+    {
+        for ($index = 0; $index < $session->total_chunks; $index++) {
+            $bytes = $this->uploadService()->expectedChunkBytes($session, $index);
+            $session = $this->uploadService()->putChunk($session, $user, $index, $this->makeChunk($bytes, $index));
+        }
+
+        return $session;
+    }
+
+    /** Byte-for-byte content that uploadAllChunks() stores. */
+    protected function expectedFileContent(UploadSession $session): string
+    {
+        $content = '';
+
+        for ($index = 0; $index < $session->total_chunks; $index++) {
+            $content .= $this->chunkContent($this->uploadService()->expectedChunkBytes($session, $index), $index);
+        }
+
+        return $content;
+    }
+
+    /** Upload arbitrary bytes, split across the session's chunk sizes. */
+    protected function uploadContent(User $user, UploadSession $session, string $content): UploadSession
+    {
+        $offset = 0;
+
+        for ($index = 0; $index < $session->total_chunks; $index++) {
+            $bytes = $this->uploadService()->expectedChunkBytes($session, $index);
+            $piece = substr($content, $offset, $bytes);
+            $offset += $bytes;
+
+            $session = $this->uploadService()->putChunk(
+                $session,
+                $user,
+                $index,
+                UploadedFile::fake()->createWithContent("chunk-{$index}.part", $piece),
+            );
+        }
+
+        return $session;
     }
 
     protected function assertValidationFails(Closure $callback, ?string $field = null): ValidationException

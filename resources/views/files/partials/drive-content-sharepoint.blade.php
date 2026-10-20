@@ -3,7 +3,7 @@
      @dragover.prevent="dragOver = true" @dragleave="dragOver = false"
      @drop.prevent="handleDrop($event)"
      :class="dragOver ? 'ring-2 ring-slate-400 ring-inset' : ''">
-    <form id="drop-upload-form" action="{{ route('files.store') }}" method="POST" enctype="multipart/form-data" class="hidden">
+    <form id="drop-upload-form" action="{{ route('files.store') }}" method="POST" enctype="multipart/form-data" class="hidden" data-chunked-upload>
         @csrf
         <input type="hidden" name="space_id" value="{{ $space->id }}">
         <input type="hidden" name="folder_id" value="{{ $folder?->id }}">

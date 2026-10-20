@@ -67,6 +67,59 @@ class FileService
         });
     }
 
+    /**
+     * Publish a file whose bytes are already on the edms disk.
+     *
+     * Used by the resumable upload pipeline after the assembled file has been
+     * verified. The caller supplies the UUID so a retried assembly reuses the
+     * same path and the same file identity instead of creating a second copy.
+     */
+    public function publishAssembled(
+        StorageSpace $space,
+        ?Folder $folder,
+        User $user,
+        string $fileUuid,
+        string $storagePath,
+        string $name,
+        ?string $mimeType,
+        int $size,
+        ?int $uploadSessionId = null,
+    ): File {
+        return DB::transaction(function () use ($space, $folder, $user, $fileUuid, $storagePath, $name, $mimeType, $size, $uploadSessionId) {
+            // uuid is not mass-assignable, so it is set explicitly to keep it in
+            // sync with the storage path chosen by the caller.
+            $file = new File([
+                'storage_space_id' => $space->id,
+                'folder_id' => $folder?->id,
+                'upload_session_id' => $uploadSessionId,
+                'created_by' => $user->id,
+                'name' => $name,
+                'mime_type' => $mimeType,
+                'size' => $size,
+                'version' => 1,
+            ]);
+            $file->uuid = $fileUuid;
+            $file->save();
+
+            FileVersion::create([
+                'file_id' => $file->id,
+                'created_by' => $user->id,
+                'version' => 1,
+                'storage_path' => $storagePath,
+                'mime_type' => $mimeType,
+                'size' => $size,
+            ]);
+
+            $this->auditService->log('file.upload', File::class, $file->id, null, [
+                'name' => $name,
+                'space_id' => $space->id,
+                'upload_session_id' => $uploadSessionId,
+            ]);
+
+            return $file->fresh();
+        });
+    }
+
     public function authorizeView(File $file, User $user): void
     {
         $this->authorizeFileAccess($file, $user, true);
@@ -594,10 +647,20 @@ class FileService
         return false;
     }
 
-    protected function buildStoragePath(StorageSpace $space, File $file, int $version, string $name): string
+    /**
+     * Storage path for a file that does not have a model instance yet (the
+     * resumable upload writes the bytes before creating the rows).
+     */
+    public function buildStoragePathFor(StorageSpace $space, string $uuid, int $version, string $name): string
     {
         $ext = pathinfo($name, PATHINFO_EXTENSION) ?: 'bin';
-        return sprintf('%s/%s/v%d.%s', $space->id, $file->uuid, $version, $ext);
+
+        return sprintf('%s/%s/v%d.%s', $space->id, $uuid, $version, $ext);
+    }
+
+    protected function buildStoragePath(StorageSpace $space, File $file, int $version, string $name): string
+    {
+        return $this->buildStoragePathFor($space, $file->uuid, $version, $name);
     }
 
     public function sanitizeFileName(string $name): string

@@ -103,6 +103,17 @@ class UploadController extends Controller
         ]);
     }
 
+    /** Finalise the upload and queue the assembly job. */
+    public function complete(Request $request, string $uuid): JsonResponse
+    {
+        $session = $this->uploadService->findForUser($uuid, $request->user());
+        $session = $this->uploadService->complete($session, $request->user());
+
+        return response()->json(
+            $this->uploadService->status($session, $request->user()),
+        );
+    }
+
     /** Cancel a session and drop the bytes received so far. */
     public function destroy(Request $request, string $uuid): JsonResponse
     {
