@@ -1,7 +1,7 @@
 {{-- SharePoint: Heavy metadata — many columns --}}
 <div class="flex-1 overflow-auto p-4" id="drop-zone"
      @dragover.prevent="dragOver = true" @dragleave="dragOver = false"
-     @drop.prevent="handleDrop($event)"
+     @drop.prevent="handleDrop($event, {{ $folder?->id ?? 'null' }}, {{ $space?->id ?? 'null' }})"
      :class="dragOver ? 'ring-2 ring-slate-400 ring-inset' : ''">
     <form id="drop-upload-form" action="{{ route('files.store') }}" method="POST" enctype="multipart/form-data" class="hidden" data-chunked-upload>
         @csrf
@@ -28,7 +28,7 @@
             <tbody>
                 @foreach ($folders as $f)
                     <tr class="hover:bg-slate-50 border-b border-slate-100">
-                        <td class="py-2 px-2"><input type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 file-checkbox" value="{{ $f->id }}"></td>
+                        <td class="py-2 px-2"><input type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 file-checkbox" value="{{ $f->id }}" data-type="folder" @change="updateSelectionFromEvent($event)" :checked="selectedIds.includes({{ $f->id }})"></td>
                         <td class="py-2 px-2">
                             <a href="{{ route('files.index', ['space' => $space->id, 'folder' => $f->id]) }}" class="font-medium text-slate-800 hover:text-blue-600 flex items-center gap-2" @click="selectedFile = null">
                                 <svg class="w-5 h-5 text-amber-500 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
@@ -57,7 +57,7 @@
                         $iconColor = in_array($ext, ['pdf']) ? 'text-red-500' : (in_array($ext, ['doc','docx']) ? 'text-blue-500' : 'text-slate-400');
                     @endphp
                     <tr class="hover:bg-slate-50 border-b border-slate-100" :class="selectedFile && selectedFile.id === {{ $file->id }} ? 'bg-indigo-50/80' : ''">
-                        <td class="py-2 px-2"><input type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 file-checkbox" value="{{ $file->id }}"></td>
+                        <td class="py-2 px-2"><input type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 file-checkbox" value="{{ $file->id }}" data-type="file" @change="updateSelectionFromEvent($event)" :checked="selectedIds.includes({{ $file->id }})"></td>
                         <td class="py-2 px-2">
                             <a href="#" @click.prevent="selectFile({{ json_encode(['id' => $file->id, 'name' => $file->name, 'mime_type' => $file->mime_type, 'version' => $file->version, 'versions' => $file->versions->map(fn($v) => ['version' => $v->version, 'creator' => $v->creator?->name, 'date' => $v->created_at->format('M j, Y')])->values()->toArray(), 'doc_type' => $file->document?->documentType?->name, 'ministry' => $file->document?->ministry?->name, 'department' => $file->document?->department?->name, 'owner' => $file->document?->owner?->name, 'sensitivity' => $file->document?->sensitivityLevel?->name]) }})"
                                class="font-medium text-slate-800 hover:text-blue-600 flex items-center gap-2">

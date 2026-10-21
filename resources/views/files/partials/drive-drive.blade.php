@@ -1,5 +1,5 @@
 {{-- Option A — Government: Clean, structured, full tree, right drawer --}}
-<div class="gov-drive flex flex-col min-h-[540px]" x-data="{ viewMode: 'list' }">
+<div class="gov-drive flex flex-col min-h-[540px]">
     <div class="gov-drive-card flex overflow-hidden flex-1">
         <aside class="gov-drive-sidebar w-60 shrink-0 flex flex-col">
             @if(in_array($viewMode ?? null, ['shared','shared-by-me','locked','archived']))

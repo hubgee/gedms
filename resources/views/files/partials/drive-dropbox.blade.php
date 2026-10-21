@@ -1,5 +1,5 @@
 {{-- Option C — Modern: Collapsible tree, slide-over preview, spacious cards --}}
-<div class="gov-drive flex flex-col min-h-[540px]" x-data="{ viewMode: 'grid', treeOpen: false }">
+<div class="gov-drive flex flex-col min-h-[540px]" x-data="{ treeOpen: false }">
     <div class="gov-drive-card flex flex-1 overflow-hidden">
         {{-- Collapsible sidebar --}}
         <aside class="shrink-0 transition-all duration-300 ease-out" :class="treeOpen ? 'w-56' : 'w-16'">

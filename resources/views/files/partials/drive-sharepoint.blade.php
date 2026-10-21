@@ -1,5 +1,5 @@
 {{-- Option B — Records/Compliance: Fixed right panel, heavy metadata, formal table --}}
-<div class="gov-drive flex min-h-[540px]" x-data="{ viewMode: 'list' }">
+<div class="gov-drive flex min-h-[540px]">
     <div class="gov-drive-card flex flex-1 overflow-hidden">
         <aside class="gov-drive-sidebar w-56 shrink-0 flex flex-col">
             @if(in_array($viewMode ?? null, ['shared','shared-by-me','locked','archived']))

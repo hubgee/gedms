@@ -134,4 +134,62 @@ class UploadInitTest extends UploadTestCase
 
         $this->assertSame(2, UploadSession::query()->count());
     }
+
+    public function test_init_returns_the_finished_session_instead_of_duplicating_a_completed_upload(): void
+    {
+        $user = $this->makeUser();
+        $space = $this->makePersonalSpace($user);
+
+        $first = $this->beginUpload($user, $space, null, 20);
+        $this->uploadService()->complete($this->uploadAllChunks($user, $first), $user);
+
+        // Mark it finished without running the queue: the status is all init()
+        // and the client care about.
+        $first->forceFill([
+            'status' => UploadSession::STATUS_COMPLETED,
+            'file_id' => null,
+        ])->save();
+
+        $again = $this->beginUpload($user, $space, null, 20);
+
+        $this->assertTrue($first->is($again), 'A finished upload must be reported back, not restarted.');
+        $this->assertSame(UploadSession::STATUS_COMPLETED, $again->status);
+        $this->assertSame(1, UploadSession::query()->count());
+    }
+
+    public function test_init_ignores_a_completed_upload_that_has_aged_out(): void
+    {
+        $user = $this->makeUser();
+        $space = $this->makePersonalSpace($user);
+
+        $first = $this->beginUpload($user, $space, null, 20);
+        $first->forceFill(['status' => UploadSession::STATUS_COMPLETED])->save();
+        UploadSession::query()
+            ->whereKey($first->id)
+            ->update(['updated_at' => now()->subHours(49)]);
+
+        $second = $this->beginUpload($user, $space, null, 20);
+
+        $this->assertFalse($first->is($second));
+        $this->assertSame(UploadSession::STATUS_PENDING, $second->status);
+        $this->assertSame(2, UploadSession::query()->count());
+    }
+
+    public function test_init_still_resumes_a_finished_session_for_a_different_user(): void
+    {
+        // Guard the lookup: the completed branch must stay scoped to the owner.
+        $owner = $this->makeUser();
+        $space = $this->makePersonalSpace($owner);
+        $first = $this->beginUpload($owner, $space, null, 20);
+        $first->forceFill(['status' => UploadSession::STATUS_COMPLETED])->save();
+
+        $otherUser = $this->makeUser();
+        $otherSpace = $this->makePersonalSpace($otherUser);
+
+        $second = $this->beginUpload($otherUser, $otherSpace, null, 20);
+
+        $this->assertFalse($first->is($second));
+        $this->assertSame($otherUser->id, $second->user_id);
+        $this->assertSame(2, UploadSession::query()->count());
+    }
 }

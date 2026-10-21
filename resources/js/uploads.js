@@ -568,6 +568,10 @@ class UploadPanel {
             dismiss: row.querySelector('[data-action="dismiss"]'),
         });
 
+        // Insert the row into the panel. Without this the panel becomes visible
+        // but stays empty: the job runs, yet nothing is ever displayed.
+        this.root.appendChild(row);
+
         this.render(job);
     }
 
@@ -624,6 +628,7 @@ class UploadQueue {
         this.panel = new UploadPanel();
         this.jobs = [];
         this.draining = false;
+        this.drainRequested = false;
     }
 
     get activeCount() {
@@ -646,34 +651,60 @@ class UploadQueue {
             const job = new UploadJob(file, { spaceId, folderId });
             this.jobs.push(job);
             this.panel.add(job);
+
+            // Re-render this row whenever the job's state or progress changes.
+            // Without this the row is drawn once ("Waiting…") and never updates,
+            // even though the upload itself proceeds.
+            job.onUpdate = () => this.panel.render(job);
         });
 
         this.drain();
     }
 
     async drain() {
-        if (this.draining) return;
+        // If a drain is already running, do not simply bail: the caller may have
+        // just queued more files, and the running loop only picks up whatever it
+        // has not read yet. Leaving `draining` set and returning here would drop
+        // those files silently, so the running loop is told to keep going.
+        if (this.draining) {
+            this.drainRequested = true;
+            return;
+        }
+
         this.draining = true;
+        this.drainRequested = false;
 
         try {
             // Files run sequentially: three parallel 8 MB chunks is already
             // plenty of pressure on a shared connection, and running files in
             // parallel makes the progress display meaningless.
-            for (const job of this.jobs) {
-                if (job.state !== 'queued') continue;
+            //
+            // The `drainRequested` flag makes this a pump: a job that is queued
+            // while an earlier, slow job is still running is picked up rather
+            // than stranded. The loop only ends once nothing is queued.
+            do {
+                this.drainRequested = false;
 
-                try {
-                    await job.start();
-                } catch (error) {
-                    if (error?.name === 'AbortError') {
-                        job.set('cancelled');
-                    } else {
-                        const uploadError = toUploadError(error);
-                        job.error = uploadError;
-                        job.set('failed');
+                const pending = this.jobs.filter((job) => job.state === 'queued');
+
+                for (const job of pending) {
+                    // The page may have been left mid-drain by a reload; a job
+                    // that is already running must not be started twice.
+                    if (job.state !== 'queued') continue;
+
+                    try {
+                        await job.start();
+                    } catch (error) {
+                        if (error?.name === 'AbortError') {
+                            job.set('cancelled');
+                        } else {
+                            const uploadError = toUploadError(error);
+                            job.error = uploadError;
+                            job.set('failed');
+                        }
                     }
                 }
-            }
+            } while (this.drainRequested);
         } finally {
             this.draining = false;
         }

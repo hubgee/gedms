@@ -54,9 +54,9 @@
                         @if($canMoveFolder) draggable="true"
                         @dragstart="$event.dataTransfer.setData('application/x-gedms-drag', JSON.stringify({type:'folder',id:{{ $f->id }}})); $event.dataTransfer.effectAllowed = 'move'"
                         @endif
-                        @if($allowDrop && $canMoveFolder) @dragover.prevent.stop @drop.prevent.stop="$parent.$parent.handleDrop($event, {{ $f->id }}, {{ $space->id ?? 'null' }})" @endif
+                        @if($allowDrop && $canMoveFolder) @dragover.prevent.stop @drop.prevent.stop="handleDrop($event, {{ $f->id }}, {{ $space->id ?? 'null' }})" @endif
                         @contextmenu.prevent.stop="contextMenu = { type: 'folder', id: {{ $f->id }}, name: '{{ addslashes($f->name) }}', locked_by: {{ $f->locked_by ?? 'null' }}, isLockedByMe: {{ $isLockedByMe ? 'true' : 'false' }}, isCreator: {{ $isCreator ? 'true' : 'false' }} }; contextX = $event.clientX; contextY = $event.clientY">
-                        <td><input type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 file-checkbox" value="{{ $f->id }}" data-type="folder"></td>
+                        <td><input type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 file-checkbox" value="{{ $f->id }}" data-type="folder" @change="updateSelectionFromEvent($event)" :checked="selectedIds.includes({{ $f->id }})"></td>
                         <td>
                             <a href="{{ route('files.index', in_array($viewMode ?? '', ['shared', 'shared-by-me']) ? ['view' => $viewMode, 'folder' => $f->id] : ['space' => $space->id ?? null, 'folder' => $f->id]) }}" class="font-medium text-slate-800 hover:text-slate-600 flex items-center gap-2"
                                @click="selectedFile = null">
@@ -95,7 +95,7 @@
                         @dragstart="$event.dataTransfer.setData('application/x-gedms-drag', JSON.stringify({type:'file',id:{{ $file->id }}})); $event.dataTransfer.effectAllowed = 'move'"
                         @endif
                         @contextmenu.prevent.stop="contextMenu = { type: 'file', id: {{ $file->id }}, name: '{{ addslashes($file->name) }}', hasDocument: {{ $file->document ? 'true' : 'false' }}, trashed: {{ $file->trashed() ? 'true' : 'false' }}, isFavorited: {{ in_array($file->id, $favoritedIds ?? []) ? 'true' : 'false' }}, locked_by: {{ $file->locked_by ?? 'null' }}, isLockedByMe: {{ $fileLockedByMe ? 'true' : 'false' }} }; contextX = $event.clientX; contextY = $event.clientY">
-                        <td><input type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 file-checkbox" value="{{ $file->id }}" data-type="file"></td>
+                        <td><input type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500 file-checkbox" value="{{ $file->id }}" data-type="file" @change="updateSelectionFromEvent($event)" :checked="selectedIds.includes({{ $file->id }})"></td>
                         <td>
                             <a href="#" @click.prevent="selectFile({{ json_encode(['id' => $file->id, 'name' => $file->name, 'mime_type' => $file->mime_type, 'version' => $file->version, 'versions' => $file->versions->map(fn($v) => ['version' => $v->version, 'creator' => $v->creator?->name, 'date' => $v->created_at->format('M j, Y')])->values()->toArray(), 'doc_type' => $file->document?->documentType?->name, 'ministry' => $file->document?->ministry?->name, 'department' => $file->document?->department?->name, 'owner' => $file->document?->owner?->name, 'sensitivity' => $file->document?->sensitivityLevel?->name, 'tags' => $file->tags->map(fn($t) => ['id' => $t->id, 'name' => $t->name, 'color' => $t->color])->values()->toArray(), 'locked_by' => $file->locked_by, 'isLockedByMe' => $file->locked_by && $file->locked_by === $currentUserId]) }})"
                                class="font-medium text-slate-800 hover:text-slate-600 flex items-center gap-2">
@@ -186,7 +186,7 @@
                @if($isNormalDrive && ($gridIsCreator || !$f->locked_by || $gridIsLockedByMe)) draggable="true"
                @dragstart="$event.dataTransfer.setData('application/x-gedms-drag', JSON.stringify({type:'folder',id:{{ $f->id }}})); $event.dataTransfer.effectAllowed = 'move'"
                @endif
-               @if($allowDrop && $isNormalDrive && ($gridIsCreator || !$f->locked_by || $gridIsLockedByMe)) @dragover.prevent.stop @drop.prevent.stop="$parent.$parent.handleDrop($event, {{ $f->id }}, {{ $space->id ?? 'null' }})" @endif
+               @if($allowDrop && $isNormalDrive && ($gridIsCreator || !$f->locked_by || $gridIsLockedByMe)) @dragover.prevent.stop @drop.prevent.stop="handleDrop($event, {{ $f->id }}, {{ $space->id ?? 'null' }})" @endif
                @contextmenu.prevent.stop="contextMenu = { type: 'folder', id: {{ $f->id }}, name: '{{ addslashes($f->name) }}', locked_by: {{ $f->locked_by ?? 'null' }}, isLockedByMe: {{ $gridIsLockedByMe ? 'true' : 'false' }}, isCreator: {{ $gridIsCreator ? 'true' : 'false' }} }; contextX = $event.clientX; contextY = $event.clientY">
                 <svg class="w-12 h-12 mx-auto {{ $folderColor }} mb-2 {{ $style === 'dropbox' ? 'w-14 h-14' : '' }}" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
                 <span class="text-sm font-medium text-slate-800 truncate block">{{ $f->name }}</span>
@@ -226,9 +226,9 @@
             <div>
                 <a :href="contextMenu ? '/files?space=' + ({{ $space->id ?? 'null' }}) + '&folder=' + contextMenu.id : '#'" class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Open</a>
                 @if($isNormalDrive)
-                <button type="button" x-show="contextMenu && (contextMenu.isCreator || !contextMenu.locked_by || contextMenu.isLockedByMe)" @click="$parent.$parent.openRenameModal({ type: 'folder', id: contextMenu.id, name: contextMenu.name }); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Rename</button>
-                <button type="button" x-show="contextMenu && (contextMenu.isCreator || !contextMenu.locked_by || contextMenu.isLockedByMe)" @click="$parent.$parent.cutToClipboard([{ type: 'folder', id: contextMenu.id }]); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Cut</button>
-                <button type="button" x-show="contextMenu && $parent.$parent.hasClipboard()" @click="$parent.$parent.submitPaste(contextMenu.id)" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Paste</button>
+                <button type="button" x-show="contextMenu && (contextMenu.isCreator || !contextMenu.locked_by || contextMenu.isLockedByMe)" @click="openRenameModal({ type: 'folder', id: contextMenu.id, name: contextMenu.name }); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Rename</button>
+                <button type="button" x-show="contextMenu && (contextMenu.isCreator || !contextMenu.locked_by || contextMenu.isLockedByMe)" @click="cutToClipboard([{ type: 'folder', id: contextMenu.id }]); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Cut</button>
+                <button type="button" x-show="contextMenu && clipboard.items.length > 0" @click="submitPaste(contextMenu.id)" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Paste</button>
                 @endif
                 <button type="button" @click="shareTarget = { type: 'folder', id: contextMenu.id }; shareModalOpen = true; contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Share</button>
                 <form :action="'{{ url('/folders') }}/' + contextMenu?.id + '/unlock'" method="POST" class="block" @click.stop x-show="contextMenu?.isLockedByMe">
@@ -250,9 +250,9 @@
             <div>
                 <a :href="contextMenu ? '{{ url('/files') }}/' + contextMenu.id + '/download' : '#'" class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Download</a>
                 @if($isNormalDrive)
-                <button type="button" x-show="contextMenu && !contextMenu.trashed && (contextMenu.isLockedByMe || !contextMenu.locked_by)" @click="$parent.$parent.openRenameModal({ type: 'file', id: contextMenu.id, name: contextMenu.name }); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Rename</button>
-                <button type="button" x-show="contextMenu && !contextMenu.trashed && (contextMenu.isLockedByMe || !contextMenu.locked_by)" @click="$parent.$parent.copyToClipboard([{ type: 'file', id: contextMenu.id }]); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Copy</button>
-                <button type="button" x-show="contextMenu && !contextMenu.trashed && (contextMenu.isLockedByMe || !contextMenu.locked_by)" @click="$parent.$parent.cutToClipboard([{ type: 'file', id: contextMenu.id }]); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Cut</button>
+                <button type="button" x-show="contextMenu && !contextMenu.trashed && (contextMenu.isLockedByMe || !contextMenu.locked_by)" @click="openRenameModal({ type: 'file', id: contextMenu.id, name: contextMenu.name }); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Rename</button>
+                <button type="button" x-show="contextMenu && !contextMenu.trashed && (contextMenu.isLockedByMe || !contextMenu.locked_by)" @click="copyToClipboard([{ type: 'file', id: contextMenu.id }]); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Copy</button>
+                <button type="button" x-show="contextMenu && !contextMenu.trashed && (contextMenu.isLockedByMe || !contextMenu.locked_by)" @click="cutToClipboard([{ type: 'file', id: contextMenu.id }]); contextMenu = null" class="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">Cut</button>
                 @endif
                 <form :action="'{{ url('/files') }}/' + contextMenu?.id + '/favorite'" method="POST" class="block" @click.stop>
                     @csrf
@@ -284,22 +284,22 @@
 
     {{-- Rename modal --}}
     @if($isNormalDrive)
-    <div x-show="$parent.$parent.renameModalOpen" x-cloak
+    <div x-show="renameModalOpen" x-cloak
          class="fixed inset-0 z-[99998] flex items-center justify-center bg-black/40"
-         @click.self="$parent.$parent.closeRenameModal()"
+         @click.self="closeRenameModal()"
          x-transition>
-        <div x-show="$parent.$parent.renameModalOpen" x-cloak @click.stop
+        <div x-show="renameModalOpen" x-cloak @click.stop
              class="bg-white rounded-xl shadow-xl border border-slate-200 p-6 w-full max-w-md mx-4">
             <h3 class="text-lg font-semibold text-slate-800 mb-4">Rename</h3>
-            <form :action="$parent.$parent.renameTarget?.type === 'folder' ? '{{ url('/folders') }}/' + $parent.$parent.renameTarget?.id : '{{ url('/files') }}/' + $parent.$parent.renameTarget?.id" method="POST" @submit="$parent.$parent.closeRenameModal()">
+            <form :action="renameTarget?.type === 'folder' ? '{{ url('/folders') }}/' + renameTarget?.id : '{{ url('/files') }}/' + renameTarget?.id" method="POST" @submit="closeRenameModal()">
                 @csrf
                 <input type="hidden" name="action" value="rename">
-                <input type="text" name="name" :value="$parent.$parent.renameName"
-                       @input="$parent.$parent.renameName = $event.target.value"
+                <input type="text" name="name" :value="renameName"
+                       @input="renameName = $event.target.value"
                        class="w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 mb-4">
                 <div class="flex gap-2">
                     <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700">Rename</button>
-                    <button type="button" @click="$parent.$parent.closeRenameModal()" class="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+                    <button type="button" @click="closeRenameModal()" class="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
                 </div>
             </form>
         </div>
@@ -337,8 +337,11 @@
                 selectUser(u) { this.shareSelectedUser = u; this.shareSearchQuery = u.name; this.shareSearchOpen = false; },
                 clearUser() { this.shareSelectedUser = null; this.shareSearchQuery = ''; this.shareSearchOpen = false; },
                 async copyLink() {
-                    const type = this.shareTarget?.type;
-                    const id = this.shareTarget?.id;
+                    // `shareTarget` is owned by the enclosing drive-content
+                    // scope; Alpine's scope chain exposes it here under its
+                    // bare name (the same mechanism the x-show bindings use).
+                    const type = shareTarget?.type;
+                    const id = shareTarget?.id;
                     if (!type || !id) return;
                     const url = '{{ route("share-link.create") }}';
                     const perm = this.$refs.permSelect?.value || 'view';

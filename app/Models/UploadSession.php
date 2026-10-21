@@ -44,6 +44,8 @@ class UploadSession extends Model
         'status',
         'failure_reason',
         'expires_at',
+        'assembling_attempts',
+        'assembling_since',
     ];
 
     protected $attributes = [
@@ -57,6 +59,8 @@ class UploadSession extends Model
         'total_chunks' => 'integer',
         'received_bytes' => 'integer',
         'expires_at' => 'datetime',
+        'assembling_attempts' => 'integer',
+        'assembling_since' => 'datetime',
     ];
 
     protected static function booted(): void
@@ -100,6 +104,29 @@ class UploadSession extends Model
             ->where('expires_at', '>', now());
     }
 
+    /**
+     * Sessions whose assembly looks abandoned: still "assembling" but untouched
+     * for longer than the configured threshold.
+     */
+    public function scopeStaleAssembling(Builder $query): Builder
+    {
+        $minutes = max(1, (int) config('uploads.stale_assembling_minutes'));
+
+        return $query->where('status', self::STATUS_ASSEMBLING)
+            ->whereRaw('COALESCE(assembling_since, updated_at) <= ?', [now()->subMinutes($minutes)]);
+    }
+
+    /** Sessions that may be pruned: finished, cancelled, expired or failed. */
+    public function scopeFinished(Builder $query): Builder
+    {
+        return $query->whereIn('status', [
+            self::STATUS_COMPLETED,
+            self::STATUS_CANCELLED,
+            self::STATUS_EXPIRED,
+            self::STATUS_FAILED,
+        ]);
+    }
+
     public function isExpired(): bool
     {
         return $this->expires_at !== null && $this->expires_at->isPast();
@@ -114,6 +141,27 @@ class UploadSession extends Model
     public function isCompleted(): bool
     {
         return $this->status === self::STATUS_COMPLETED;
+    }
+
+    public function isAssembling(): bool
+    {
+        return $this->status === self::STATUS_ASSEMBLING;
+    }
+
+    /**
+     * Whether this session has been assembling long enough that its worker must
+     * be presumed dead. Recovery uses this to decide what to requeue.
+     */
+    public function isStaleAssembling(): bool
+    {
+        if (! $this->isAssembling()) {
+            return false;
+        }
+
+        $since = $this->assembling_since ?? $this->updated_at;
+        $minutes = max(1, (int) config('uploads.stale_assembling_minutes'));
+
+        return $since !== null && $since->lte(now()->subMinutes($minutes));
     }
 
     /** @return array<int, int> */

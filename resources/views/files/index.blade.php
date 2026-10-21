@@ -99,6 +99,11 @@
                 dragOver: false,
                 detailsOpen: true,
                 previewSidebarOpen: true,
+                // View mode / sidebar live on the shared component (not on the
+                // individual drive partials) so the toolbar, the content pane
+                // and the details drawer all read the same state.
+                viewMode: props.viewMode || 'list',
+                sidebarCollapsed: false,
                 favoritedIds: props.favoritedIds || [],
                 clipboard: { items: [], operation: null },
                 renameModalOpen: false,
@@ -172,8 +177,31 @@
                         }
                     }
                 },
+                /**
+                 * Selection is mirrored into reactive state so Alpine re-renders
+                 * the bulk toolbar. Reading `:checked` straight from the DOM does
+                 * not create a reactive dependency, which is why the toolbar used
+                 * to stay hidden. `getSelectedIds()`/`getSelectedItems()` keep
+                 * reading the DOM so the submitting forms stay authoritative.
+                 */
+                selectedIds: [],
+                syncSelection() {
+                    this.selectedIds = this.getSelectedIds();
+                },
+                updateSelectionFromEvent(e) {
+                    const cb = e.target;
+                    const id = parseInt(cb.value, 10);
+                    if (isNaN(id)) return;
+                    if (cb.checked) {
+                        if (!this.selectedIds.includes(id)) this.selectedIds = [...this.selectedIds, id];
+                    } else {
+                        this.selectedIds = this.selectedIds.filter(selected => selected !== id);
+                    }
+                },
                 toggleAll(e) {
-                    document.querySelectorAll('.file-checkbox').forEach(cb => cb.checked = e.target.checked);
+                    const checked = e.target.checked;
+                    document.querySelectorAll('.file-checkbox').forEach(cb => cb.checked = checked);
+                    this.syncSelection();
                 },
                 getSelectedIds() {
                     return Array.from(document.querySelectorAll('.file-checkbox:checked')).map(cb => parseInt(cb.value, 10)).filter(id => !isNaN(id));
@@ -190,6 +218,7 @@
                 },
                 clearSelection() {
                     document.querySelectorAll('.file-checkbox').forEach(cb => cb.checked = false);
+                    this.syncSelection();
                 },
                 copyToClipboard(items) {
                     this.clipboard = { items: items, operation: 'copy' };
@@ -232,6 +261,25 @@
                 setFavorited(fileId, fav) {
                     if (fav) this.favoritedIds = [...(this.favoritedIds || []), fileId];
                     else this.favoritedIds = (this.favoritedIds || []).filter(id => id !== fileId);
+                },
+                // --- Toolbar / bulk-action helpers ---------------------------------
+                // The drive partials own small Alpine scopes (view mode, context
+                // menu, share modal). The shared state lives here on the single
+                // `driveManager` component; every partial reaches it through
+                // normal Alpine scope inheritance instead of $parent chains,
+                // which break as soon as a partial gains or loses an x-data
+                // wrapper, or is rendered inside x-teleport / x-if.
+                selectedCount() {
+                    // Must read the reactive array (not the DOM): only then does
+                    // Alpine track this as a dependency of x-show/x-text and
+                    // re-render the bulk toolbar when the selection changes.
+                    return this.selectedIds.length;
+                },
+                selectedCountLabel() {
+                    return this.selectedIds.length + ' selected';
+                },
+                moveSelectedTo(folderId) {
+                    this.submitPaste(folderId);
                 }
             }));
         });

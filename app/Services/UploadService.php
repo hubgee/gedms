@@ -51,6 +51,9 @@ class UploadService
      *
      * Reusing the session is what makes an interrupted upload continue from
      * where it stopped, even after a browser restart or a cleared client cache.
+     *
+     * If an identical file was already uploaded and completed recently, that
+     * finished session is returned instead of starting a second copy.
      */
     public function init(
         User $user,
@@ -105,6 +108,26 @@ class UploadService
             ])->save();
 
             return $this->reconcileChunks($existing);
+        }
+
+        // The same file already finished uploading recently. A completed session
+        // is not "resumable", so without this branch the client's retry (a
+        // reload after a dropped connection, a double-clicked button) would
+        // silently store a second identical copy of the file. Report the
+        // finished session instead; the client treats `completed` as "nothing
+        // left to do" and does not re-send a byte.
+        $completed = UploadSession::query()
+            ->where('user_id', $user->id)
+            ->where('storage_space_id', $space->id)
+            ->where('folder_id', $folder?->id)
+            ->where('fingerprint', $fingerprint)
+            ->where('status', UploadSession::STATUS_COMPLETED)
+            ->where('updated_at', '>', now()->subHours($ttlHours))
+            ->latest('id')
+            ->first();
+
+        if ($completed) {
+            return $completed;
         }
 
         $session = UploadSession::create([
@@ -237,6 +260,8 @@ class UploadService
             ->update([
                 'status' => UploadSession::STATUS_ASSEMBLING,
                 'failure_reason' => null,
+                'assembling_since' => now(),
+                'assembling_attempts' => DB::raw('assembling_attempts + 1'),
             ]);
 
         if ($claimed === 0) {
@@ -433,6 +458,57 @@ class UploadService
         $this->authorizeSession($session, $user);
 
         return $session;
+    }
+
+    /**
+     * Requeue an assembly that looks abandoned, or fail it once it has been
+     * retried too many times.
+     *
+     * This is the safety net for a worker that died mid-assembly. Without it a
+     * session would sit in "assembling" forever: it accepts no more chunks, it
+     * never expires, and no future request would ever move it.
+     *
+     * Returns a short description of what was done, for the command's output.
+     */
+    public function recoverStale(UploadSession $session): string
+    {
+        if (! $session->isStaleAssembling()) {
+            return 'skipped';
+        }
+
+        $limit = max(1, (int) config('uploads.stale_assembling_attempts'));
+        $attempts = (int) $session->assembling_attempts;
+
+        if ($attempts >= $limit) {
+            $this->fail($session, "Assembly did not finish after {$attempts} attempts.");
+
+            return 'failed';
+        }
+
+        // The bytes are the only thing assembly needs. Confirm they are all still
+        // there before spending another worker run on them.
+        $session = $this->reconcileChunks($session);
+
+        if ($session->missingChunkIndexes() !== []) {
+            // Chunks vanished: no number of retries will help. Put the session
+            // back so the client can re-send the gaps if it is still open.
+            $session->forceFill([
+                'status' => UploadSession::STATUS_UPLOADING,
+                'assembling_since' => null,
+            ])->save();
+
+            return 'reverted';
+        }
+
+        $session->forceFill([
+            'status' => UploadSession::STATUS_ASSEMBLING,
+            'assembling_since' => now(),
+            'assembling_attempts' => $attempts + 1,
+        ])->save();
+
+        AssembleUpload::dispatch($session->id);
+
+        return 'requeued';
     }
 
     /**
