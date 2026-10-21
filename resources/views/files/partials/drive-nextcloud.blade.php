@@ -157,12 +157,12 @@
                 <button type="button" @click="cutToClipboard(getSelectedItems().all)" class="text-blue-700 hover:underline font-medium">Cut</button>
                 <button type="button" x-show="clipboard.items.length > 0" @click="submitPaste({{ $folder?->id ?? 'null' }})" class="text-blue-700 hover:underline font-medium">Paste</button>
                 @endif
-                <form action="{{ route('files.bulk-destroy') }}" method="POST" class="inline" onsubmit="return confirm('Delete selected items?')">
+                <form action="{{ route('files.bulk-destroy') }}" method="POST" class="inline" onsubmit="return deleteSelected()">
                     @csrf
-                    <template x-for="(id, idx) in selectedIds" :key="idx">
-                        <input type="hidden" name="items[idx][id]" :value="id">
-                        <input type="hidden" name="items[idx][type]" :value="getSelectedItemType(id)">
-                    </template>
+                    {{-- Bulk delete inputs are populated from getSelectedItems() below --}}
+                    <div data-items>
+                        <!-- Inputs will be populated by the delete submit handler -->
+                    </div>
                     <button type="submit" class="text-red-600 hover:underline font-medium">Delete</button>
                 </form>
                 @if($canCreateFolder ?? false)
