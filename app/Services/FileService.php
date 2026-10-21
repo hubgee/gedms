@@ -312,6 +312,8 @@ class FileService
     {
         $this->authorizeFileAccess($file, $user, false);
         if ($file->trashed()) {
+            // File::forceDeleted() also removes the stored bytes: the version
+            // rows cascade with the file, so the paths are captured first.
             $file->forceDelete();
             $this->auditService->log('file.force_delete', File::class, $file->id, ['name' => $file->name], null);
         } else {
