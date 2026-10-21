@@ -159,8 +159,9 @@
                 @endif
                 <form action="{{ route('files.bulk-destroy') }}" method="POST" class="inline" onsubmit="return confirm('Delete selected items?')">
                     @csrf
-                    <template x-for="id in getSelectedIds()" :key="id">
-                        <input type="hidden" name="ids[]" :value="id">
+                    <template x-for="(id, idx) in selectedIds" :key="idx">
+                        <input type="hidden" name="items[idx][id]" :value="id">
+                        <input type="hidden" name="items[idx][type]" :value="getSelectedItemType(id)">
                     </template>
                     <button type="submit" class="text-red-600 hover:underline font-medium">Delete</button>
                 </form>

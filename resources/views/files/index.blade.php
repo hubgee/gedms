@@ -23,6 +23,9 @@
         @if (session('success'))
             <div class="card card-body bg-emerald-50 border-emerald-200 text-emerald-800">{{ session('success') }}</div>
         @endif
+        @if (session('error'))
+            <div class="card card-body bg-red-50 border-red-200 text-red-800">{{ session('error') }}</div>
+        @endif
 
         @if(!in_array($viewMode ?? null, ['shared','shared-by-me','locked','archived']))
         <div class="flex flex-wrap items-center gap-2">
@@ -205,6 +208,10 @@
                 },
                 getSelectedIds() {
                     return Array.from(document.querySelectorAll('.file-checkbox:checked')).map(cb => parseInt(cb.value, 10)).filter(id => !isNaN(id));
+                },
+                getSelectedItemType(id) {
+                    const cb = document.querySelector(`.file-checkbox[value="${id}"]`);
+                    return cb ? cb.getAttribute('data-type') || 'file' : 'file';
                 },
                 getSelectedItems() {
                     const files = [], folders = [];

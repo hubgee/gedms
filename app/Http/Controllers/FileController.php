@@ -542,9 +542,15 @@ class FileController extends Controller
 
     public function bulkDestroy(Request $request): RedirectResponse
     {
-        $request->validate(['ids' => 'required|array', 'ids.*' => 'integer']);
-        $count = $this->fileService->bulkDelete($request->ids, Auth::user());
-        return back()->with('success', "{$count} item(s) deleted.");
+        $request->validate(['items' => 'required|array', 'items.*.id' => 'integer', 'items.*.type' => 'required|in:file,folder']);
+        try {
+            $count = $this->fileService->bulkDelete($request->items, Auth::user());
+            return back()->with('success', "{$count} item(s) deleted.");
+        } catch (\AuthorizationException $e) {
+            return back()->with('error', 'You are not authorized to delete these items.');
+        } catch (\Throwable $e) {
+            return back()->with('error', 'An error occurred while deleting items: ' . $e->getMessage());
+        }
     }
 
     public function bulkMove(Request $request): RedirectResponse

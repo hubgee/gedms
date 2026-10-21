@@ -548,17 +548,51 @@ class FileService
         return $comment;
     }
 
-    public function bulkDelete(array $fileIds, User $user): int
+    public function bulkDelete(array $items, User $user): int
     {
         $count = 0;
-        foreach ($fileIds as $id) {
-            $file = File::find($id);
-            if ($file) {
+        foreach ($items as $idx => $item) {
+            $id = $item['id'] ?? null;
+            $type = $item['type'] ?? 'file';
+
+            if (is_null($id)) {
+                continue;
+            }
+
+            $model = null;
+
+            if ($type === 'folder') {
+                $model = Folder::withTrashed()->find($id);
+            } else {
+                $model = File::withTrashed()->find($id);
+            }
+
+            if ($model) {
                 try {
-                    $this->delete($file, $user);
+                    if ($model->trashed()) {
+                        if ($model instanceof File) {
+                            $model->forceDelete();
+                            $this->auditService->log('file.force_delete', File::class, $model->id, ['name' => $model->name], null);
+                        } else {
+                            // For folders, force delete if trashed
+                            $model->forceDelete();
+                            $this->auditService->log('folder.force_delete', Folder::class, $model->id, ['name' => $model->name], null);
+                        }
+                    } else {
+                        if ($model instanceof File) {
+                            $model->delete();
+                            $this->auditService->log('file.delete', File::class, $model->id, ['name' => $model->name], null);
+                        } else {
+                            $model->delete();
+                            $this->auditService->log('folder.delete', Folder::class, $model->id, ['name' => $model->name], null);
+                        }
+                    }
                     $count++;
-                } catch (\Throwable) {
+                } catch (\AuthorizationException $e) {
                     // skip unauthorized
+                } catch (\Throwable $e) {
+                    // log unexpected error but continue
+                    \Log::error('Bulk delete error', ['id' => $id, 'model' => get_class($model), 'error' => $e->getMessage()]);
                 }
             }
         }
