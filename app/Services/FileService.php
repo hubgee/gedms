@@ -18,6 +18,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class FileService
 {
@@ -551,51 +553,53 @@ class FileService
     public function bulkDelete(array $items, User $user): int
     {
         $count = 0;
-        foreach ($items as $idx => $item) {
-            $id = $item['id'] ?? null;
+
+        foreach ($items as $item) {
+            $id = (int) ($item['id'] ?? 0);
             $type = $item['type'] ?? 'file';
 
-            if (is_null($id)) {
+            if ($id <= 0) {
                 continue;
             }
 
-            $model = null;
-
-            if ($type === 'folder') {
-                $model = Folder::withTrashed()->find($id);
-            } else {
-                $model = File::withTrashed()->find($id);
-            }
-
-            if ($model) {
-                try {
-                    if ($model->trashed()) {
-                        if ($model instanceof File) {
-                            $model->forceDelete();
-                            $this->auditService->log('file.force_delete', File::class, $model->id, ['name' => $model->name], null);
-                        } else {
-                            // For folders, force delete if trashed
-                            $model->forceDelete();
-                            $this->auditService->log('folder.force_delete', Folder::class, $model->id, ['name' => $model->name], null);
-                        }
-                    } else {
-                        if ($model instanceof File) {
-                            $model->delete();
-                            $this->auditService->log('file.delete', File::class, $model->id, ['name' => $model->name], null);
-                        } else {
-                            $model->delete();
-                            $this->auditService->log('folder.delete', Folder::class, $model->id, ['name' => $model->name], null);
-                        }
+            try {
+                if ($type === 'folder') {
+                    $folder = Folder::withTrashed()->find($id);
+                    if (! $folder) {
+                        continue;
                     }
-                    $count++;
-                } catch (\AuthorizationException $e) {
-                    // skip unauthorized
-                } catch (\Throwable $e) {
-                    // log unexpected error but continue
-                    \Log::error('Bulk delete error', ['id' => $id, 'model' => get_class($model), 'error' => $e->getMessage()]);
+
+                    $this->authorizeFolderAccess($folder, $user, false);
+
+                    if ($folder->locked_by !== null && $folder->created_by !== $user->id) {
+                        continue;
+                    }
+
+                    if ($folder->trashed()) {
+                        $folder->forceDelete();
+                        $this->auditService->log('folder.force_delete', Folder::class, $folder->id, ['name' => $folder->name], null);
+                    } else {
+                        $folder->delete();
+                        $this->auditService->log('folder.delete', Folder::class, $folder->id, ['name' => $folder->name], null);
+                    }
+                } else {
+                    $file = File::withTrashed()->find($id);
+                    if (! $file) {
+                        continue;
+                    }
+
+                    // delete() authorizes access and already handles the
+                    // trashed (forceDelete) vs active (soft delete) branches.
+                    $this->delete($file, $user);
                 }
+
+                $count++;
+            } catch (AccessDeniedHttpException|NotFoundHttpException $e) {
+                // Skip items the user may not touch or that no longer exist.
+                continue;
             }
         }
+
         return $count;
     }
 

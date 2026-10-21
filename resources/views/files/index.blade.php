@@ -227,26 +227,22 @@
                     document.querySelectorAll('.file-checkbox').forEach(cb => cb.checked = false);
                     this.syncSelection();
                 },
-                deleteSelected() {
-                    // Get selected items from checkboxes (same logic as getSelectedItems())
-                    const files = [], folders = [];
-                    document.querySelectorAll('.file-checkbox:checked').forEach(cb => {
-                        const id = parseInt(cb.value, 10);
-                        if (isNaN(id)) return;
-                        const type = cb.getAttribute('data-type') || 'file';
-                        (type === 'folder' ? folders : files).push({ type, id });
-                    });
-                    const items = [...files, ...folders];
+                submitBulkDelete() {
+                    const items = this.getSelectedItems().all;
                     if (!items.length) return;
-                    const form = document.querySelector('form[action$="bulk-destroy"]');
+                    if (!confirm('Delete selected items?')) return;
+
+                    const form = document.getElementById('bulk-delete-form')
+                        || this.$el.querySelector('form[action$="bulk-destroy"]');
                     if (!form) return;
+
                     const cont = form.querySelector('[data-items]');
                     if (cont) {
                         cont.innerHTML = items.map((i, idx) =>
                             `<input type="hidden" name="items[${idx}][type]" value="${i.type}"><input type="hidden" name="items[${idx}][id]" value="${i.id}">`
                         ).join('');
                     }
-                    return confirm('Delete selected items?');
+                    form.submit();
                 },
                 copyToClipboard(items) {
                     this.clipboard = { items: items, operation: 'copy' };
