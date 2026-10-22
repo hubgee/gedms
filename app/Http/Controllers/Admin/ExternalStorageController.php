@@ -15,10 +15,24 @@ class ExternalStorageController extends Controller
         protected UploadStorageFactory $factory,
     ) {}
 
-    public function index(): View
+    public function index(Request $request): View
     {
+        $query = StorageSpace::query()
+            ->with(['ownerDepartment', 'ownerSection', 'ownerMinistry', 'ownerUser'])
+            ->orderBy('type')->orderBy('name');
+
+        if ($request->filled('type')) {
+            $query->where('type', $request->string('type'));
+        }
+
+        if ($request->filled('q')) {
+            $query->where('name', 'like', '%'.$request->string('q').'%');
+        }
+
         return view('admin.external-storage.index', [
-            'spaces' => StorageSpace::orderBy('type')->orderBy('name')->get(),
+            'spaces' => $query->paginate(25)->withQueryString(),
+            'type' => $request->string('type')->toString(),
+            'q' => $request->string('q')->toString(),
         ]);
     }
 
