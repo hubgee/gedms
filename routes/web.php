@@ -73,6 +73,10 @@ Route::middleware('auth')->group(function () {
         Route::delete('permissions/{permission}', [RolePermissionController::class, 'destroyPermission'])->name('permissions.destroy');
         Route::get('audit-logs', [AuditLogController::class, 'index'])->name('audit-logs.index');
         Route::get('reports', fn () => view('admin.reports'))->name('reports.index');
+        Route::get('storage-spaces', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'index'])->name('storage-spaces.index');
+        Route::get('storage-spaces/{space}/external-storage', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'edit'])->name('storage-spaces.external-storage.edit');
+        Route::post('storage-spaces/{space}/external-storage', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'update'])->name('storage-spaces.external-storage.update');
+        Route::post('storage-spaces/{space}/external-storage/test', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'test'])->name('storage-spaces.external-storage.test');
     });
 
     Route::prefix('files')->name('files.')->group(function () {

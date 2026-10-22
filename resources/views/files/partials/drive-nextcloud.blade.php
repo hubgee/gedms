@@ -49,10 +49,17 @@
                     <span x-show="!sidebarCollapsed" x-cloak>Favorites</span>
                 </a>
                 <div class="pt-2 mt-2 border-t border-slate-200">
-                    <div class="flex items-center gap-3 px-3 py-2 rounded-lg text-slate-400 text-sm" title="Coming soon">
-                        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/></svg>
-                        <span x-show="!sidebarCollapsed" x-cloak>External storage</span>
-                    </div>
+                    @if(auth()->user()?->can('manage-storage') || auth()->user()?->hasRole('admin'))
+                        <a href="{{ route('admin.storage-spaces.index') }}" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-slate-600 hover:bg-slate-200/80" title="Configure external storage">
+                            <svg class="w-5 h-5 shrink-0 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/></svg>
+                            <span x-show="!sidebarCollapsed" x-cloak>External storage</span>
+                        </a>
+                    @else
+                        <div class="flex items-center gap-3 px-3 py-2 rounded-lg text-slate-400 text-sm" title="Coming soon">
+                            <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/></svg>
+                            <span x-show="!sidebarCollapsed" x-cloak>External storage</span>
+                        </div>
+                    @endif
                 </div>
             </nav>
         </aside>

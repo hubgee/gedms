@@ -427,6 +427,18 @@ class CloudUploadStorageTest extends UploadTestCase
         $this->assertTrue(app(UploadStorage::class)->isEmpty($directory));
     }
 
+    public function test_the_dropbox_backend_reports_healthy(): void
+    {
+        $this->useDropbox();
+
+        $this->assertTrue(app(UploadStorage::class)->healthCheck());
+    }
+
+    public function test_the_local_backend_reports_healthy(): void
+    {
+        $this->assertTrue(app(UploadStorage::class)->healthCheck());
+    }
+
     public function test_the_factory_builds_every_documented_driver(): void
     {
         config([

@@ -158,6 +158,11 @@ return [
         // Seconds before a Dropbox request is abandoned.
         'timeout' => (int) env('DROPBOX_TIMEOUT', 120),
 
+        // Override only for testing/proxying; production uses the defaults.
+        'api_url' => env('DROPBOX_API_URL', 'https://api.dropboxapi.com/2'),
+        'content_url' => env('DROPBOX_CONTENT_URL', 'https://content.dropboxapi.com/2'),
+
+
         // Objects larger than this are trusted on their size alone when an
         // assembly is retried, because hashing them means reading them back.
         'verify_read_back_limit' => (int) env('DROPBOX_VERIFY_READ_BACK_LIMIT', 67108864),

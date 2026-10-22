@@ -290,6 +290,11 @@ class FaultInjectingUploadStorage implements UploadStorage
         return $temporary;
     }
 
+    public function healthCheck(): bool
+    {
+        return $this->inner->healthCheck();
+    }
+
     protected function sizeOf(string $path): int
     {
         $size = @filesize($path);

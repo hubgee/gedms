@@ -273,10 +273,39 @@ class DropboxUploadStorage implements UploadStorage
         return null;
     }
 
+    protected function alreadyAssembled(string $destination, int $expectedBytes, ?string $expectedSha256): bool
+    {
+        $metadata = $this->client->metadata($destination);
+
+        if ($metadata === null) {
+            return false;
+        }
+
+        if ((int) ($metadata['size'] ?? -1) !== $expectedBytes) {
+            return false;
+        }
+
+        if ($expectedSha256 === null) {
+            return true;
+        }
+
+        if ($expectedBytes > $this->verifyReadBackLimit) {
+            // Reading a 10 GB object back to hash it costs as much as
+            // assembling it again. The size already rules out a partial
+            // assembly, and the assembly itself verified the hash.
+            return true;
+        }
+
+        return $this->hashMatches($destination, $expectedSha256);
+    }
+
+    public function healthCheck(): bool
+    {
+        return $this->client->healthCheck();
+    }
+
     /**
      * Whether a previous attempt already produced the finished file.
-     */
-    protected function alreadyAssembled(string $destination, int $expectedBytes, ?string $expectedSha256): bool
     {
         $metadata = $this->client->metadata($destination);
 

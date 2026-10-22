@@ -10,6 +10,7 @@ use App\Models\UploadChunk;
 use App\Models\UploadSession;
 use App\Models\User;
 use App\Services\Uploads\UploadIncompleteException;
+use App\Services\Uploads\UploadStorageFactory;
 use App\Services\Uploads\UploadVerificationException;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -51,6 +52,7 @@ class UploadService
         protected FileService $fileService,
         protected AuditService $auditService,
         protected UploadStorage $storage,
+        protected UploadStorageFactory $storageFactory,
     ) {}
 
     /**
@@ -168,6 +170,21 @@ class UploadService
      * in-flight requests): the last complete write wins and the byte counter is
      * recomputed rather than incremented, so it can never drift.
      */
+    /**
+     * Storage scoped to the session's space, so a space configured with an
+     * external provider uses that provider instead of the global default.
+     */
+    protected function storageFor(UploadSession $session): UploadStorage
+    {
+        $space = $session->storageSpace;
+
+        if ($space && $space->storage_driver) {
+            return $this->storageFactory->makeForSpace($space);
+        }
+
+        return $this->storage;
+    }
+
     public function putChunk(
         UploadSession $session,
         User $user,
@@ -196,7 +213,7 @@ class UploadService
         }
 
         try {
-            $this->storage->putChunk($this->chunkPath($session, $index), $chunk->getRealPath(), $sha256);
+            $this->storageFor($session)->putChunk($this->chunkPath($session, $index), $chunk->getRealPath(), $sha256);
         } catch (RuntimeException $e) {
             throw ValidationException::withMessages(['chunk' => $e->getMessage()]);
         }
@@ -325,7 +342,7 @@ class UploadService
             range(0, (int) $session->total_chunks - 1),
         );
 
-        $this->storage->assemble(
+        $this->storageFor($session)->assemble(
             $storagePath,
             $sources,
             (int) $session->total_bytes,
@@ -337,12 +354,12 @@ class UploadService
         // a local path, because an object store has no local path: reading it
         // from the store is what keeps the checks from silently degrading to
         // "no local file, so no checks" the moment the disk stops being local.
-        $head = $this->storage->readHead($storagePath, self::HEAD_PROBE_BYTES);
+        $head = $this->storageFor($session)->readHead($storagePath, self::HEAD_PROBE_BYTES);
 
         try {
             $this->assertNoExecutablePayload($head);
         } catch (UploadVerificationException $e) {
-            $this->storage->delete($storagePath);
+            $this->storageFor($session)->delete($storagePath);
 
             throw $e;
         }
@@ -368,7 +385,7 @@ class UploadService
             ])->save();
         });
 
-        $this->storage->deleteDirectory($this->temporaryDirectory($session));
+        $this->storageFor($session)->deleteDirectory($this->temporaryDirectory($session));
 
         $this->auditService->log('upload.completed', UploadSession::class, $session->id, null, [
             'file_id' => $session->file_id,
@@ -544,7 +561,7 @@ class UploadService
 
         foreach ($session->chunks()->get() as $chunk) {
             $path = $this->chunkPath($session, (int) $chunk->chunk_index);
-            $onDisk = $this->storage->exists($path) ? (int) $this->storage->size($path) : 0;
+            $onDisk = $this->storageFor($session)->exists($path) ? (int) $this->storageFor($session)->size($path) : 0;
 
             if ($onDisk !== (int) $chunk->bytes) {
                 $chunk->delete();
@@ -640,7 +657,7 @@ class UploadService
 
     protected function deleteTemporaryFiles(UploadSession $session): void
     {
-        $this->storage->deleteDirectory($this->temporaryDirectory($session));
+        $this->storageFor($session)->deleteDirectory($this->temporaryDirectory($session));
     }
 
     protected function acceptsChunks(UploadSession $session): bool

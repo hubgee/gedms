@@ -177,57 +177,139 @@ class EdmsUploadChaos extends Command
 
         // 3. Read the head back: this is what the executable-payload check and
         //    the MIME sniff use, so it has to work on a cloud store too.
-        $head = $storage->readHead($assembled, 8192);
+        //
+        //    A provider that is not read-after-write consistent may answer
+        //    "not there yet" for the first few reads, so the read is retried
+        //    until the bytes actually come back (or the attempt budget runs
+        //    out). Retrying on exceptions alone is not enough, because a stale
+        //    read is a successful call that returns nothing.
+        $head = null;
+        $headAttempts = 0;
+        $headError = null;
+
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            $headAttempts = $attempt;
+
+            try {
+                $head = $storage->readHead($assembled, 8192);
+
+                if (is_string($head) && $head !== '') {
+                    break;
+                }
+            } catch (Throwable $e) {
+                $headError = $e->getMessage();
+            }
+        }
+
+        if (! is_string($head) || $head === '') {
+            $headError = $headError ?? 'The store reported the object as missing.';
+        }
 
         $report['phases']['read_head'] = [
             'ok' => is_string($head) && $head !== '',
             'bytes' => is_string($head) ? strlen($head) : 0,
+            'attempts' => $headAttempts,
+            'error' => is_string($head) && $head !== '' ? null : $headError,
         ];
 
         // 4. Read a slice: previewing a 10 GB object must not download it.
-        $slice = $storage->readStream($assembled, 1024, 4096);
         $sliceBytes = 0;
+        $rangeAttempts = 0;
+        $rangeError = null;
 
-        if (is_resource($slice)) {
-            while (! feof($slice)) {
-                $buffer = fread($slice, 8192);
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            $rangeAttempts = $attempt;
 
-                if ($buffer === false || $buffer === '') {
-                    break;
+            try {
+                $slice = $storage->readStream($assembled, 1024, 4096);
+                $sliceBytes = 0;
+
+                if (is_resource($slice)) {
+                    while (! feof($slice)) {
+                        $buffer = fread($slice, 8192);
+
+                        if ($buffer === false || $buffer === '') {
+                            break;
+                        }
+
+                        $sliceBytes += strlen($buffer);
+                    }
+
+                    fclose($slice);
                 }
 
-                $sliceBytes += strlen($buffer);
+                if ($sliceBytes === 4096) {
+                    break;
+                }
+            } catch (Throwable $e) {
+                $rangeError = $e->getMessage();
+                $sliceBytes = 0;
             }
+        }
 
-            fclose($slice);
+        if ($sliceBytes !== 4096) {
+            $rangeError = $rangeError ?? "Expected 4096 bytes, got {$sliceBytes}.";
         }
 
         $report['phases']['read_range'] = [
             'ok' => $sliceBytes === 4096,
             'bytes' => $sliceBytes,
+            'attempts' => $rangeAttempts,
+            'error' => $sliceBytes === 4096 ? null : $rangeError,
         ];
 
         // 5. Copy the finished file and confirm the copy is identical.
-        $copied = $this->attempt(
-            fn () => $storage->copy($assembled, $copy),
-            $attempts,
-        );
-
         $copyMatches = false;
+        $copyAttempts = 0;
+        $copyError = null;
 
-        if ($copied['ok']) {
-            $copyMatches = $this->hashOf($storage, $copy) === $expectedSha;
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            $copyAttempts = $attempt;
+
+            try {
+                $storage->copy($assembled, $copy);
+
+                // The copy itself may land behind a read lag, so the hash is
+                // retried until the bytes are actually visible.
+                for ($read = 0; $read < $attempts; $read++) {
+                    if ($this->hashOf($storage, $copy) === $expectedSha) {
+                        $copyMatches = true;
+                        break 2;
+                    }
+                }
+
+                $copyMatches = $this->hashOf($storage, $copy) === $expectedSha;
+
+                if ($copyMatches) {
+                    break;
+                }
+            } catch (Throwable $e) {
+                $copyError = $e->getMessage();
+            }
+        }
+
+        if (! $copyMatches) {
+            $copyError = $copyError ?? 'The copy did not come back identical.';
         }
 
         $report['phases']['copy'] = [
-            'ok' => $copied['ok'] && $copyMatches,
-            'attempts' => $copied['attempts'],
+            'ok' => $copyMatches,
+            'attempts' => $copyAttempts,
             'identical' => $copyMatches,
-            'error' => $copied['error'],
+            'error' => $copyMatches ? null : $copyError,
         ];
 
         // 6. The assembled bytes must be the bytes that were sent.
-        $actualSha = $this->hashOf($storage, $assembled);
+        $actualSha = null;
+
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            $actualSha = $this->hashOf($storage, $assembled);
+
+            if ($actualSha !== null) {
+                break;
+            }
+        }
+
         $report['actual_sha256'] = $actualSha;
         $report['verified'] = $actualSha === $expectedSha;
 
@@ -270,6 +352,32 @@ class EdmsUploadChaos extends Command
         }
 
         return ['ok' => false, 'attempts' => $attempts, 'error' => $error];
+    }
+
+    /**
+     * Run an operation that returns a value, retrying it the way the browser
+     * uploader does.
+     *
+     * @param  callable(): mixed  $operation
+     * @return array{ok: bool, attempts: int, error: ?string, value: mixed}
+     */
+    protected function attemptValue(callable $operation, int $attempts): array
+    {
+        $error = null;
+        $value = null;
+        $used = $attempts;
+
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            try {
+                $value = $operation();
+
+                return ['ok' => true, 'attempts' => $attempt, 'error' => null, 'value' => $value];
+            } catch (Throwable $e) {
+                $error = $e->getMessage();
+            }
+        }
+
+        return ['ok' => false, 'attempts' => $used, 'error' => $error, 'value' => $value];
     }
 
     /**

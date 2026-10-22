@@ -226,6 +226,8 @@ class DocumentController extends Controller
             $fileVersion->storage_path,
             $file->name,
             $file->mime_type,
+            'attachment',
+            $file->storageSpace,
         );
     }
 

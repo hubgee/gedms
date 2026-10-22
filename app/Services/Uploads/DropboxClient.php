@@ -35,6 +35,8 @@ class DropboxClient
         protected string $refreshToken,
         protected string $root = '/edms',
         protected int $timeout = 120,
+        protected string $apiUrl = 'https://api.dropboxapi.com/2',
+        protected string $contentUrl = 'https://content.dropboxapi.com/2',
     ) {}
 
     /**
@@ -122,7 +124,7 @@ class DropboxClient
         $response = Http::withToken($this->accessToken())
             ->withHeaders($headers)
             ->withOptions(['sink' => $localFile, 'timeout' => $this->timeout])
-            ->post(self::CONTENT.'/files/download');
+            ->post($this->contentUrl.'/files/download');
 
         $this->guard($response, 'download');
     }
@@ -141,7 +143,7 @@ class DropboxClient
                 ]),
             ])
             ->withOptions(['timeout' => $this->timeout])
-            ->post(self::API.'/files/copy_v2');
+            ->post($this->apiUrl.'/files/copy_v2');
 
         $this->guard($response, 'copy');
     }
@@ -157,7 +159,7 @@ class DropboxClient
                 'Range' => 'bytes=0-'.max(0, $bytes - 1),
             ])
             ->withOptions(['timeout' => $this->timeout])
-            ->post(self::CONTENT.'/files/download');
+            ->post($this->contentUrl.'/files/download');
 
         if (! $response->successful()) {
             return null;
@@ -179,7 +181,7 @@ class DropboxClient
                 ]),
             ])
             ->withOptions(['timeout' => $this->timeout])
-            ->post(self::API.'/files/get_metadata');
+            ->post($this->apiUrl.'/files/get_metadata');
 
         if ($response->status() === 409) {
             // Dropbox answers 409 for "path/not_found" as well as for real
@@ -201,7 +203,7 @@ class DropboxClient
                 'Dropbox-API-Arg' => $this->apiArg(['path' => $this->dropboxPath($path)]),
             ])
             ->withOptions(['timeout' => $this->timeout])
-            ->post(self::API.'/files/delete_v2');
+            ->post($this->apiUrl.'/files/delete_v2');
 
         if ($response->status() === 409 && $this->isNotFound($response)) {
             return;
@@ -226,7 +228,7 @@ class DropboxClient
                 ]),
             ])
             ->withOptions(['timeout' => $this->timeout])
-            ->post(self::API.'/files/list_folder');
+            ->post($this->apiUrl.'/files/list_folder');
 
         if ($response->status() === 409 && $this->isNotFound($response)) {
             return [];
@@ -242,11 +244,25 @@ class DropboxClient
         return array_values(array_filter($entries, 'is_array'));
     }
 
+    /**
+     * Liveness probe: can we reach the API and renew the access token?
+     */
+    public function healthCheck(): bool
+    {
+        try {
+            $this->listChildren($this->root === '' ? '/' : $this->root);
+
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
     public function startUploadSession(): string
     {
         $response = Http::withToken($this->accessToken())
             ->withOptions(['timeout' => $this->timeout])
-            ->post(self::CONTENT.'/files/upload_session/start');
+            ->post($this->contentUrl.'/files/upload_session/start');
 
         $this->guard($response, 'upload_session/start');
 
@@ -363,7 +379,7 @@ class DropboxClient
             ])
             ->withBody($body, 'application/octet-stream')
             ->withOptions(['timeout' => $this->timeout])
-            ->post(self::CONTENT.'/'.$endpoint);
+            ->post($this->contentUrl.'/'.$endpoint);
 
         $this->guard($response, $endpoint);
     }

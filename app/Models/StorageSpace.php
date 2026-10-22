@@ -5,12 +5,16 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Throwable;
 
 class StorageSpace extends Model
 {
     public const TYPE_PERSONAL = 'personal';
+
     public const TYPE_SECTION = 'section';
+
     public const TYPE_DEPARTMENT = 'department';
+
     public const TYPE_MINISTRY = 'ministry';
 
     protected $fillable = [
@@ -21,11 +25,61 @@ class StorageSpace extends Model
         'owner_ministry_id',
         'name',
         'is_active',
+        'storage_driver',
+        'storage_config',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
     ];
+
+    /**
+     * The decoded external-storage configuration, or null when the space uses
+     * the global driver.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function storageConfig(): ?array
+    {
+        $raw = $this->attributes['storage_config'] ?? null;
+
+        if (! is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        try {
+            $decrypted = decrypt($raw);
+        } catch (Throwable $e) {
+            // Fall back to plain JSON for legacy/unencrypted rows.
+            $decrypted = $raw;
+        }
+
+        $decoded = json_decode($decrypted, true);
+
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
+     * Persist an external-storage configuration, encrypted at rest.
+     *
+     * @param  array<string, mixed>|null  $config
+     */
+    public function setStorageConfig(?array $config): void
+    {
+        if ($config === null) {
+            $this->attributes['storage_config'] = null;
+
+            return;
+        }
+
+        $this->attributes['storage_config'] = encrypt(json_encode($config));
+    }
+
+    public function usesExternalStorage(): bool
+    {
+        return is_string($this->storage_driver) && $this->storage_driver !== ''
+            && $this->storage_driver !== 'local';
+    }
 
     protected static function booted(): void
     {

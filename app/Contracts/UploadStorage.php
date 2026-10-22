@@ -116,8 +116,11 @@ interface UploadStorage
     public function readHead(string $path, int $bytes): ?string;
 
     /**
-     * Physical path to the bytes when the backend has one, or null for stores
-     * that cannot expose a local path (for example S3).
+     * Cheap liveness probe for the backend.
+     *
+     * Returns true when the store can be reached and is usable, false
+     * otherwise. Used by health checks and connection tests; it must not
+     * throw.
      */
-    public function localPath(string $path): ?string;
+    public function healthCheck(): bool;
 }

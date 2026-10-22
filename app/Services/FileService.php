@@ -14,6 +14,7 @@ use App\Models\ShareLink;
 use App\Models\StorageSpace;
 use App\Models\Tag;
 use App\Models\User;
+use App\Services\Uploads\UploadStorageFactory;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -27,7 +28,20 @@ class FileService
         protected SpaceService $spaceService,
         protected AuditService $auditService,
         protected UploadStorage $storage,
+        protected UploadStorageFactory $storageFactory,
     ) {}
+
+    /**
+     * Storage scoped to a space, honouring per-space external configuration.
+     */
+    protected function storageFor(?StorageSpace $space): UploadStorage
+    {
+        if ($space && $space->storage_driver) {
+            return $this->storageFactory->makeForSpace($space);
+        }
+
+        return $this->storage;
+    }
 
     public function upload(UploadedFile $uploadedFile, StorageSpace $space, ?Folder $folder, User $user): File
     {
@@ -50,7 +64,7 @@ class FileService
             ]);
 
             $storagePath = $this->buildStoragePath($space, $file, 1, $name);
-            $this->storage->putFile($storagePath, (string) $uploadedFile->getRealPath());
+            $this->storageFor($space)->putFile($storagePath, (string) $uploadedFile->getRealPath());
 
             FileVersion::create([
                 'file_id' => $file->id,
@@ -165,14 +179,14 @@ class FileService
         $this->authorizeFileAccess($file, $user, true);
 
         $version = $file->versions()->where('version', $file->version)->first();
-        if (! $version || ! $this->storage->exists($version->storage_path)) {
+        if (! $version || ! $this->storageFor($file->storageSpace)->exists($version->storage_path)) {
             abort(404, 'File content not found');
         }
 
         $this->auditService->log('file.preview', File::class, $file->id, null, ['name' => $file->name]);
 
         $path = $version->storage_path;
-        $size = $this->storage->size($path) ?? 0;
+        $size = $this->storageFor($file->storageSpace)->size($path) ?? 0;
 
         $start = 0;
         $length = $size;
@@ -200,8 +214,8 @@ class FileService
         // first bytes of a 10 GB object costs one small request instead of a
         // full download.
         $stream = $status === 206
-            ? $this->storage->readStream($path, $start, $length)
-            : $this->storage->readStream($path);
+            ? $this->storageFor($file->storageSpace)->readStream($path, $start, $length)
+            : $this->storageFor($file->storageSpace)->readStream($path);
 
         if ($stream === null) {
             abort(404, 'File content not found');
@@ -224,7 +238,7 @@ class FileService
 
         return DB::transaction(function () use ($file, $uploadedFile, $user, $newVersion, $mimeType, $size, $name) {
             $storagePath = $this->buildStoragePath($file->storageSpace, $file, $newVersion, $name);
-            $this->storage->putFile($storagePath, (string) $uploadedFile->getRealPath());
+            $this->storageFor($file->storageSpace)->putFile($storagePath, (string) $uploadedFile->getRealPath());
 
             FileVersion::create([
                 'file_id' => $file->id,
@@ -291,7 +305,7 @@ class FileService
             ]);
 
             $storagePath = $this->buildStoragePath($targetSpace, $copy, 1, $file->name);
-            $this->storage->copy($version->storage_path, $storagePath);
+            $this->storageFor($file->storageSpace)->copy($version->storage_path, $storagePath);
 
             FileVersion::create([
                 'file_id' => $copy->id,
@@ -647,15 +661,17 @@ class FileService
      * path, so a download works whether the file lives on a local disk, in a
      * bucket or in a Dropbox folder.
      */
-    public function streamStoredFile(string $path, string $name, string $mimeType, string $disposition = 'attachment'): StreamedResponse
+    public function streamStoredFile(string $path, string $name, string $mimeType, string $disposition = 'attachment', ?StorageSpace $space = null): StreamedResponse
     {
-        $stream = $this->storage->readStream($path);
+        $storage = $this->storageFor($space);
+
+        $stream = $storage->readStream($path);
 
         if ($stream === null) {
             abort(404, 'File content not found');
         }
 
-        $size = $this->storage->size($path) ?? 0;
+        $size = $storage->size($path) ?? 0;
 
         return response()->stream(function () use ($stream) {
             $this->emit($stream);

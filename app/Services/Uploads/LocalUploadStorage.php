@@ -308,6 +308,17 @@ class LocalUploadStorage implements UploadStorage
         return $disk->path($path);
     }
 
+    public function healthCheck(): bool
+    {
+        try {
+            $this->disk()->files('');
+
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
     protected function makeDirectory(string $directory): void
     {
         $this->disk()->makeDirectory($directory);

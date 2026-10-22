@@ -258,10 +258,19 @@ class S3UploadStorage implements UploadStorage
         return null;
     }
 
+    public function healthCheck(): bool
+    {
+        try {
+            $this->client()->headBucket(['Bucket' => $this->bucket()]);
+
+            return true;
+        } catch (Throwable $e) {
+            return false;
+        }
+    }
+
     /**
      * Expose a PSR-7 stream as a PHP resource.
-     *
-     * Guzzle's StreamWrapper does this without copying anything, so the
      * response is consumed as it arrives. When the helper is unavailable the
      * stream is copied into a temp file, which is correct but slower.
      *
