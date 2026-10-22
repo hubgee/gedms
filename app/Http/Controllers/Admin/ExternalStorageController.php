@@ -77,8 +77,17 @@ class ExternalStorageController extends Controller
 
     protected function authorizeSpace(StorageSpace $space): void
     {
-        // Only administrators configure storage backends.
-        abort_unless(auth()->user()?->can('manage-storage') || auth()->user()?->hasRole('admin'), 403);
+        $user = auth()->user();
+
+        abort_unless(
+            $user && (
+                $user->hasRole('System Administrator')
+                || $user->hasRole('Department Administrator')
+                || $user->can('manage-system')
+                || $user->can('manage-department')
+            ),
+            403
+        );
     }
 
     /**

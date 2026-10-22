@@ -226,6 +226,13 @@ return [
             'active'     => 'admin.audit-logs*',
             'permission' => ['view-audit-logs', 'view-audit-only'],
         ],
+        [
+            'label'      => 'Storage Spaces',
+            'route'      => 'admin.storage-spaces.index',
+            'icon'       => 'settings',
+            'active'     => 'admin.storage-spaces*',
+            'permission' => 'manage-system',
+        ],
     ],
 
 ];
