@@ -38,6 +38,14 @@ use RuntimeException;
  */
 class UploadService
 {
+    /**
+     * Bytes read from the head of an assembled file to reject PHP payloads and
+     * to sniff the MIME type. 8 KiB is enough for every signature the checks
+     * care about, and small enough to stay one cheap ranged read on a cloud
+     * store even for a 10 GB object.
+     */
+    private const HEAD_PROBE_BYTES = 8192;
+
     public function __construct(
         protected SpaceService $spaceService,
         protected FileService $fileService,
@@ -324,18 +332,22 @@ class UploadService
             $session->sha256,
         );
 
-        $absolutePath = $this->storage->localPath($storagePath);
+        // The head of the assembled file feeds both the executable-payload
+        // check and the MIME sniff. It is read through the contract instead of
+        // a local path, because an object store has no local path: reading it
+        // from the store is what keeps the checks from silently degrading to
+        // "no local file, so no checks" the moment the disk stops being local.
+        $head = $this->storage->readHead($storagePath, self::HEAD_PROBE_BYTES);
 
         try {
-            $this->assertNoExecutablePayload($absolutePath);
+            $this->assertNoExecutablePayload($head);
         } catch (UploadVerificationException $e) {
             $this->storage->delete($storagePath);
 
             throw $e;
         }
 
-        $mimeType = $this->detectMimeType($absolutePath) ?: ($session->mime_type ?: 'application/octet-stream');
-
+        $mimeType = $this->detectMimeType($head) ?: ($session->mime_type ?: 'application/octet-stream');
         DB::transaction(function () use ($session, $fileUuid, $storagePath, $mimeType) {
             $file = $this->fileService->publishAssembled(
                 $session->storageSpace,
@@ -602,20 +614,11 @@ class UploadService
      * through a controller, but rejecting executable content here removes the
      * whole "uploaded script gets executed" class of bug for good.
      */
-    protected function assertNoExecutablePayload(?string $absolutePath): void
+    protected function assertNoExecutablePayload(?string $head): void
     {
-        if ($absolutePath === null) {
+        if ($head === null) {
             return;
         }
-
-        $handle = @fopen($absolutePath, 'rb');
-
-        if ($handle === false) {
-            throw new RuntimeException('The assembled file is not readable.');
-        }
-
-        $head = fread($handle, 512) ?: '';
-        fclose($handle);
 
         $head = ltrim($head, "\xEF\xBB\xBF \t\r\n");
 
@@ -624,13 +627,13 @@ class UploadService
         }
     }
 
-    protected function detectMimeType(?string $absolutePath): ?string
+    protected function detectMimeType(?string $head): ?string
     {
-        if ($absolutePath === null || ! is_readable($absolutePath)) {
+        if ($head === null || $head === '') {
             return null;
         }
 
-        $detected = (new \finfo(FILEINFO_MIME_TYPE))->file($absolutePath);
+        $detected = (new \finfo(FILEINFO_MIME_TYPE))->buffer($head);
 
         return is_string($detected) && $detected !== '' ? $detected : null;
     }

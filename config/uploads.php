@@ -72,4 +72,95 @@ return [
     // How many recovery requeues are allowed before the session is failed.
     'stale_assembling_attempts' => (int) env('UPLOAD_STALE_ASSEMBLING_ATTEMPTS', 3),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Byte store
+    |--------------------------------------------------------------------------
+    |
+    | Where the bytes live while they are being uploaded. The pipeline talks
+    | to the UploadStorage contract, so the driver can be swapped without
+    | touching the state machine.
+    |
+    |   local   : the "edms" disk on this machine (the default)
+    |   s3      : any S3-compatible bucket (AWS, MinIO, R2, Spaces, Wasabi)
+    |   dropbox : a Dropbox folder, through the Dropbox API
+    |
+    | The driver decides where *everything* ends up, not just the transient
+    | chunks: published files, downloads, previews and copies all go through
+    | the same contract. So UPLOAD_STORAGE_DRIVER=s3 with
+    | UPLOAD_CLOUD_DISK=edms-cloud moves the whole application's storage into
+    | the bucket.
+    |
+    */
+
+    'storage_driver' => env('UPLOAD_STORAGE_DRIVER', 'local'),
+
+    // The disk used by the "local" driver.
+    'local_disk' => env('UPLOAD_LOCAL_DISK', 'edms'),
+
+    // The disk used by the "s3" driver (see config/filesystems.php).
+    'cloud_disk' => env('UPLOAD_CLOUD_DISK', 'edms-cloud'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Cloud fault injection
+    |--------------------------------------------------------------------------
+    |
+    | Makes the byte store behave like a cloud provider on a bad day. Every
+    | knob is off by default, so a normal run is completely unaffected.
+    |
+    | This is the application-level half of the network testing: it fails the
+    | same way a provider fails when the link falls over. The wire-level half
+    | (resetting TCP connections, delaying packets) belongs to a proxy in
+    | front of the provider.
+    |
+    |   php artisan edms:upload-chaos --preset=flaky
+    |
+    | The named presets are listed by:
+    |
+    |   php artisan edms:upload-chaos --list
+    |
+    */
+
+    'cloud_fault' => [
+        'latency_ms' => (int) env('UPLOAD_FAULT_LATENCY_MS', 0),
+        'jitter_ms' => (int) env('UPLOAD_FAULT_JITTER_MS', 0),
+        'bandwidth_bps' => env('UPLOAD_FAULT_BANDWIDTH_BPS') === null
+            ? null
+            : (int) env('UPLOAD_FAULT_BANDWIDTH_BPS'),
+        'failure_rate' => (float) env('UPLOAD_FAULT_FAILURE_RATE', 0),
+        'drop_after_bytes' => env('UPLOAD_FAULT_DROP_AFTER_BYTES') === null
+            ? null
+            : (int) env('UPLOAD_FAULT_DROP_AFTER_BYTES'),
+        'quota_exceeded' => (bool) env('UPLOAD_FAULT_QUOTA_EXCEEDED', false),
+        'eventual_consistency_reads' => (int) env('UPLOAD_FAULT_EVENTUAL_CONSISTENCY_READS', 0),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Dropbox
+    |--------------------------------------------------------------------------
+    |
+    | Credentials for the "dropbox" driver. The refresh token is the
+    | long-lived one; the short-lived access token is renewed and cached
+    | automatically.
+    |
+    */
+
+    'dropbox' => [
+        'app_key' => env('DROPBOX_APP_KEY', ''),
+        'app_secret' => env('DROPBOX_APP_SECRET', ''),
+        'refresh_token' => env('DROPBOX_REFRESH_TOKEN', ''),
+
+        // Folder in the Dropbox account that holds the EDMS files.
+        'root' => env('DROPBOX_ROOT', '/edms'),
+
+        // Seconds before a Dropbox request is abandoned.
+        'timeout' => (int) env('DROPBOX_TIMEOUT', 120),
+
+        // Objects larger than this are trusted on their size alone when an
+        // assembly is retried, because hashing them means reading them back.
+        'verify_read_back_limit' => (int) env('DROPBOX_VERIFY_READ_BACK_LIMIT', 67108864),
+    ],
+
 ];

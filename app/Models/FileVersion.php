@@ -2,9 +2,9 @@
 
 namespace App\Models;
 
+use App\Contracts\UploadStorage;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Support\Facades\Storage;
 
 class FileVersion extends Model
 {
@@ -25,8 +25,14 @@ class FileVersion extends Model
         return $this->storage_path;
     }
 
+    /**
+     * Whether the bytes of this version are still in the store.
+     *
+     * The store is reached through the UploadStorage contract, so the answer
+     * is the same whether the file lives on a local disk or in a bucket.
+     */
     public function exists(): bool
     {
-        return Storage::disk('edms')->exists($this->storage_path);
+        return app(UploadStorage::class)->exists($this->storage_path);
     }
 }

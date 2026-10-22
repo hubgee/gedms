@@ -9,6 +9,7 @@ use App\Models\File;
 use App\Models\SensitivityLevel;
 use App\Models\WorkflowStepInstance;
 use App\Services\DocumentService;
+use App\Services\FileService;
 use App\Services\WorkflowService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -77,12 +78,12 @@ class DocumentController extends Controller
             $q->where(function ($q2) use ($document) {
                 $q2->where('subject_type', Document::class)->where('subject_id', $document->id);
             })
-            ->orWhere(function ($q2) use ($docWorkflowIds) {
-                $q2->where('subject_type', \App\Models\WorkflowInstance::class)->whereIn('subject_id', $docWorkflowIds);
-            })
-            ->orWhere(function ($q2) use ($docStepIds) {
-                $q2->where('subject_type', \App\Models\WorkflowStepInstance::class)->whereIn('subject_id', $docStepIds);
-            });
+                ->orWhere(function ($q2) use ($docWorkflowIds) {
+                    $q2->where('subject_type', \App\Models\WorkflowInstance::class)->whereIn('subject_id', $docWorkflowIds);
+                })
+                ->orWhere(function ($q2) use ($docStepIds) {
+                    $q2->where('subject_type', \App\Models\WorkflowStepInstance::class)->whereIn('subject_id', $docStepIds);
+                });
         })
             ->with('user')
             ->latest('created_at')
@@ -144,6 +145,7 @@ class DocumentController extends Controller
     {
         $this->authorize('update', $document);
         $this->documentService->submitForReview($document, Auth::user());
+
         return back()->with('success', 'Document submitted for review.');
     }
 
@@ -157,6 +159,7 @@ class DocumentController extends Controller
             return back()->with('error', 'This document requires workflow approval. Use Submit for Review instead.');
         }
         $this->documentService->promoteToApproved($document, Auth::user());
+
         return back()->with('success', 'Document promoted to approved.');
     }
 
@@ -164,6 +167,7 @@ class DocumentController extends Controller
     {
         $this->authorize('approve', $document);
         $this->documentService->approve($document, Auth::user());
+
         return back()->with('success', 'Document approved.');
     }
 
@@ -171,6 +175,7 @@ class DocumentController extends Controller
     {
         $this->authorize('approve', $document);
         $this->documentService->reject($document, $request->input('comment', ''), Auth::user());
+
         return back()->with('success', 'Document rejected.');
     }
 
@@ -178,6 +183,7 @@ class DocumentController extends Controller
     {
         $this->authorize('approve', $document);
         $this->documentService->archive($document, Auth::user());
+
         return back()->with('success', 'Document archived.');
     }
 
@@ -185,6 +191,7 @@ class DocumentController extends Controller
     {
         $this->authorize('update', $document);
         $this->documentService->checkOut($document, Auth::user());
+
         return back()->with('success', 'Document checked out.');
     }
 
@@ -193,6 +200,7 @@ class DocumentController extends Controller
         $this->authorize('update', $document);
         $document->file || abort(400, 'Cannot check in: the associated file is no longer available.');
         $this->documentService->checkIn($document, $document->file, Auth::user());
+
         return back()->with('success', 'Document checked in.');
     }
 
@@ -200,6 +208,7 @@ class DocumentController extends Controller
     {
         $this->authorize('update', $document);
         $this->documentService->cancelCheckOut($document, Auth::user());
+
         return back()->with('success', 'Check-out cancelled.');
     }
 
@@ -213,10 +222,10 @@ class DocumentController extends Controller
         $fileVersion = $docVersion->fileVersion;
         $file = $document->file;
 
-        return \Illuminate\Support\Facades\Storage::disk('edms')->download(
+        return app(FileService::class)->streamStoredFile(
             $fileVersion->storage_path,
             $file->name,
-            ['Content-Type' => $file->mime_type]
+            $file->mime_type,
         );
     }
 
@@ -225,6 +234,7 @@ class DocumentController extends Controller
         $this->authorize('view', $document);
         abort_unless($workflowStepInstance->workflowInstance->document_id === $document->id, 403);
         $this->workflowService->approveStep($workflowStepInstance, Auth::user(), request('comment'));
+
         return back()->with('success', 'Step approved.');
     }
 
@@ -233,13 +243,15 @@ class DocumentController extends Controller
         $this->authorize('view', $document);
         abort_unless($workflowStepInstance->workflowInstance->document_id === $document->id, 403);
         $this->workflowService->rejectStep($workflowStepInstance, Auth::user(), $request->input('comment'));
+
         return back()->with('success', 'Step rejected. Document returned to draft.');
     }
 
     public function toggleLegalHold(Document $document): RedirectResponse
     {
         Auth::user()->can('manage-retention-disposition') || abort(403);
-        $document->update(['legal_hold' => !$document->legal_hold]);
+        $document->update(['legal_hold' => ! $document->legal_hold]);
+
         return back()->with('success', $document->legal_hold ? 'Legal hold applied.' : 'Legal hold removed.');
     }
 }

@@ -2,20 +2,20 @@
 
 namespace App\Services;
 
+use App\Contracts\UploadStorage;
 use App\Models\File;
 use App\Models\FileComment;
 use App\Models\FileFavorite;
 use App\Models\FileShare;
-use App\Models\FolderShare;
-use App\Models\ShareLink;
 use App\Models\FileVersion;
 use App\Models\Folder;
+use App\Models\FolderShare;
+use App\Models\ShareLink;
 use App\Models\StorageSpace;
 use App\Models\Tag;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
@@ -25,7 +25,8 @@ class FileService
 {
     public function __construct(
         protected SpaceService $spaceService,
-        protected AuditService $auditService
+        protected AuditService $auditService,
+        protected UploadStorage $storage,
     ) {}
 
     public function upload(UploadedFile $uploadedFile, StorageSpace $space, ?Folder $folder, User $user): File
@@ -49,7 +50,7 @@ class FileService
             ]);
 
             $storagePath = $this->buildStoragePath($space, $file, 1, $name);
-            $uploadedFile->storeAs(dirname($storagePath), basename($storagePath), ['disk' => 'edms']);
+            $this->storage->putFile($storagePath, (string) $uploadedFile->getRealPath());
 
             FileVersion::create([
                 'file_id' => $file->id,
@@ -136,6 +137,7 @@ class FileService
         if ($share && ($viewOnly || $share->canEdit())) {
             return true;
         }
+
         return $this->userHasFolderShareAccess($file->folder_id, $user->id, $viewOnly);
     }
 
@@ -150,10 +152,11 @@ class FileService
 
         $this->auditService->log('file.download', File::class, $file->id, null, ['name' => $file->name]);
 
-        return Storage::disk('edms')->download(
+        return $this->streamStoredFile(
             $version->storage_path,
             $file->name,
-            ['Content-Type' => $file->mime_type]
+            $file->mime_type,
+            'attachment',
         );
     }
 
@@ -162,21 +165,21 @@ class FileService
         $this->authorizeFileAccess($file, $user, true);
 
         $version = $file->versions()->where('version', $file->version)->first();
-        if (! $version || ! Storage::disk('edms')->exists($version->storage_path)) {
+        if (! $version || ! $this->storage->exists($version->storage_path)) {
             abort(404, 'File content not found');
         }
 
         $this->auditService->log('file.preview', File::class, $file->id, null, ['name' => $file->name]);
 
-        $path = Storage::disk('edms')->path($version->storage_path);
-        $size = (int) filesize($path);
+        $path = $version->storage_path;
+        $size = $this->storage->size($path) ?? 0;
 
         $start = 0;
         $length = $size;
         $status = 200;
         $headers = [
             'Content-Type' => $file->mime_type,
-            'Content-Disposition' => 'inline; filename="' . basename($file->name) . '"',
+            'Content-Disposition' => 'inline; filename="'.$this->safeFileName($file->name).'"',
             'Accept-Ranges' => 'bytes',
             'Content-Length' => $size,
         ];
@@ -193,25 +196,19 @@ class FileService
             $headers['Content-Length'] = $length;
         }
 
-        $finalStart = $start;
-        $finalLength = $length;
+        // A ranged read asks the store for just that slice, so previewing the
+        // first bytes of a 10 GB object costs one small request instead of a
+        // full download.
+        $stream = $status === 206
+            ? $this->storage->readStream($path, $start, $length)
+            : $this->storage->readStream($path);
 
-        return response()->stream(function () use ($path, $finalStart, $finalLength) {
-            $stream = fopen($path, 'rb');
-            if ($finalStart > 0) {
-                fseek($stream, $finalStart, SEEK_SET);
-            }
-            $bytesLeft = $finalLength;
-            while ($bytesLeft > 0 && ! feof($stream)) {
-                $chunk = fread($stream, min(8192, $bytesLeft));
-                if ($chunk === false) {
-                    break;
-                }
-                $bytesLeft -= strlen($chunk);
-                echo $chunk;
-                flush();
-            }
-            fclose($stream);
+        if ($stream === null) {
+            abort(404, 'File content not found');
+        }
+
+        return response()->stream(function () use ($stream) {
+            $this->emit($stream);
         }, $status, $headers);
     }
 
@@ -227,7 +224,7 @@ class FileService
 
         return DB::transaction(function () use ($file, $uploadedFile, $user, $newVersion, $mimeType, $size, $name) {
             $storagePath = $this->buildStoragePath($file->storageSpace, $file, $newVersion, $name);
-            $uploadedFile->storeAs(dirname($storagePath), basename($storagePath), ['disk' => 'edms']);
+            $this->storage->putFile($storagePath, (string) $uploadedFile->getRealPath());
 
             FileVersion::create([
                 'file_id' => $file->id,
@@ -253,6 +250,7 @@ class FileService
         $this->authorizeFileAccess($file, $user, false);
         $file->update(['name' => $this->sanitizeFileName($newName)]);
         $this->auditService->log('file.rename', File::class, $file->id, ['name' => $file->getOriginal('name')], ['name' => $newName]);
+
         return $file->fresh();
     }
 
@@ -265,6 +263,7 @@ class FileService
 
         $file->update(['folder_id' => $targetFolder?->id]);
         $this->auditService->log('file.move', File::class, $file->id, null, ['folder_id' => $targetFolder?->id]);
+
         return $file->fresh();
     }
 
@@ -292,7 +291,7 @@ class FileService
             ]);
 
             $storagePath = $this->buildStoragePath($targetSpace, $copy, 1, $file->name);
-            Storage::disk('edms')->copy($version->storage_path, $storagePath);
+            $this->storage->copy($version->storage_path, $storagePath);
 
             FileVersion::create([
                 'file_id' => $copy->id,
@@ -304,6 +303,7 @@ class FileService
             ]);
 
             $this->auditService->log('file.copy', File::class, $copy->id, null, ['source_file_id' => $file->id]);
+
             return $copy->fresh();
         });
     }
@@ -334,6 +334,7 @@ class FileService
         }
         $file->restore();
         $this->auditService->log('file.restore', File::class, $file->id, null, ['name' => $file->name]);
+
         return $file->fresh();
     }
 
@@ -347,6 +348,7 @@ class FileService
             ['shared_by_user_id' => $user->id, 'permission' => $permission]
         );
         $this->auditService->log('file.share', File::class, $file->id, null, ['shared_with' => $shareWith->email, 'permission' => $permission]);
+
         return $share;
     }
 
@@ -375,6 +377,7 @@ class FileService
             'created_by_user_id' => $user->id,
         ]);
         $this->auditService->log('file.share_link', File::class, $file->id, null, []);
+
         return $link;
     }
 
@@ -396,6 +399,7 @@ class FileService
             'created_by_user_id' => $user->id,
         ]);
         $this->auditService->log('folder.share_link', Folder::class, $folder->id, null, []);
+
         return $link;
     }
 
@@ -413,6 +417,7 @@ class FileService
             'created_by' => $user->id,
         ]);
         $this->auditService->log('folder.create', Folder::class, $folder->id, null, ['name' => $folder->name]);
+
         return $folder;
     }
 
@@ -421,6 +426,7 @@ class FileService
         $this->spaceService->userCanAccess($folder->storageSpace, $user) || abort(403);
         $folder->update(['name' => $this->sanitizeFileName($newName)]);
         $this->auditService->log('folder.rename', Folder::class, $folder->id, ['name' => $folder->getOriginal('name')], ['name' => $newName]);
+
         return $folder->fresh();
     }
 
@@ -433,6 +439,7 @@ class FileService
 
         $folder->update(['parent_id' => $targetParent?->id]);
         $this->auditService->log('folder.move', Folder::class, $folder->id, null, ['parent_id' => $targetParent?->id]);
+
         return $folder->fresh();
     }
 
@@ -451,6 +458,7 @@ class FileService
         $this->authorizeFileAccess($file, $user, false);
         $file->update(['locked_by' => $user->id, 'locked_at' => now()]);
         $this->auditService->log('file.lock', File::class, $file->id, null, []);
+
         return $file->fresh();
     }
 
@@ -462,6 +470,7 @@ class FileService
         }
         $file->update(['locked_by' => null, 'locked_at' => null]);
         $this->auditService->log('file.unlock', File::class, $file->id, null, []);
+
         return $file->fresh();
     }
 
@@ -470,6 +479,7 @@ class FileService
         $this->authorizeFolderAccess($folder, $user, false);
         $folder->update(['locked_by' => $user->id, 'locked_at' => now()]);
         $this->auditService->log('folder.lock', Folder::class, $folder->id, null, []);
+
         return $folder->fresh();
     }
 
@@ -481,6 +491,7 @@ class FileService
         }
         $folder->update(['locked_by' => null, 'locked_at' => null]);
         $this->auditService->log('folder.unlock', Folder::class, $folder->id, null, []);
+
         return $folder->fresh();
     }
 
@@ -494,6 +505,7 @@ class FileService
             ['shared_by_user_id' => $user->id, 'permission' => $permission]
         );
         $this->auditService->log('folder.share', Folder::class, $folder->id, null, ['shared_with' => $shareWith->email, 'permission' => $permission]);
+
         return $share;
     }
 
@@ -503,15 +515,18 @@ class FileService
         $exists = FileFavorite::where('user_id', $user->id)->where('file_id', $file->id)->exists();
         if ($exists) {
             FileFavorite::where('user_id', $user->id)->where('file_id', $file->id)->delete();
+
             return false;
         }
         FileFavorite::create(['user_id' => $user->id, 'file_id' => $file->id]);
+
         return true;
     }
 
     public function findOrCreateTag(StorageSpace $space, string $name, ?string $color, User $user): Tag
     {
         $this->spaceService->userCanAccess($space, $user) || abort(403);
+
         return Tag::firstOrCreate(
             ['storage_space_id' => $space->id, 'name' => trim($name)],
             ['color' => $color ?? '#64748b']
@@ -549,6 +564,7 @@ class FileService
             'body' => $body,
         ]);
         $this->auditService->log('file.comment', File::class, $file->id, null, ['comment_id' => $comment->id]);
+
         return $comment;
     }
 
@@ -620,7 +636,69 @@ class FileService
                 }
             }
         }
+
         return $count;
+    }
+
+    /**
+     * A streamed download of a stored file.
+     *
+     * The bytes come from the UploadStorage contract rather than from a disk
+     * path, so a download works whether the file lives on a local disk, in a
+     * bucket or in a Dropbox folder.
+     */
+    public function streamStoredFile(string $path, string $name, string $mimeType, string $disposition = 'attachment'): StreamedResponse
+    {
+        $stream = $this->storage->readStream($path);
+
+        if ($stream === null) {
+            abort(404, 'File content not found');
+        }
+
+        $size = $this->storage->size($path) ?? 0;
+
+        return response()->stream(function () use ($stream) {
+            $this->emit($stream);
+        }, 200, [
+            'Content-Type' => $mimeType,
+            'Content-Length' => $size,
+            'Content-Disposition' => $disposition.'; filename="'.$this->safeFileName($name).'"',
+            'Accept-Ranges' => 'bytes',
+        ]);
+    }
+
+    /**
+     * Copy a stream to the response and close it.
+     *
+     * @param  resource  $stream
+     */
+    protected function emit($stream): void
+    {
+        try {
+            while (! feof($stream)) {
+                $chunk = fread($stream, 8192);
+
+                if ($chunk === false || $chunk === '') {
+                    break;
+                }
+
+                echo $chunk;
+                flush();
+            }
+        } finally {
+            is_resource($stream) && fclose($stream);
+        }
+    }
+
+    /**
+     * A file name that is safe to put in a Content-Disposition header.
+     */
+    protected function safeFileName(string $name): string
+    {
+        $safe = basename(str_replace('\\', '/', $name));
+        $safe = str_replace(['"', "\r", "\n"], '', $safe);
+
+        return $safe === '' ? 'file' : $safe;
     }
 
     protected function authorizeFileAccess(File $file, User $user, bool $viewOnly): bool
@@ -648,6 +726,7 @@ class FileService
             }
             $folder = $folder->parent;
         }
+
         return false;
     }
 
@@ -664,6 +743,7 @@ class FileService
             }
             $f = $f->parent;
         }
+
         return false;
     }
 
@@ -684,6 +764,7 @@ class FileService
             }
             $current = $current->parent;
         }
+
         return false;
     }
 
@@ -737,6 +818,7 @@ class FileService
                 if (! $existing->is_mandatory) {
                     $existing->update(['is_mandatory' => true]);
                 }
+
                 continue;
             }
             Folder::create([
@@ -757,6 +839,7 @@ class FileService
             return [];
         }
         $section = $space->ownerSection;
+
         return $section ? $section->getMandatoryFolderNames() : [];
     }
 
@@ -802,6 +885,7 @@ class FileService
             }
             $current = $current->parent;
         }
+
         return false;
     }
 
@@ -823,6 +907,7 @@ class FileService
         if ($folder === null) {
             return false;
         }
+
         return $this->folderIsInsideMandatoryTree($folder, $space, $names);
     }
 }

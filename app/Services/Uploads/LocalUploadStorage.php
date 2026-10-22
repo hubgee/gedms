@@ -79,6 +79,11 @@ class LocalUploadStorage implements UploadStorage
         }
     }
 
+    public function putFile(string $path, string $sourcePath, ?string $expectedSha256 = null): void
+    {
+        $this->putChunk($path, $sourcePath, $expectedSha256);
+    }
+
     public function assemble(
         string $destination,
         array $sourcePaths,
@@ -199,6 +204,97 @@ class LocalUploadStorage implements UploadStorage
     public function deleteDirectory(string $directory): void
     {
         $this->disk()->deleteDirectory($directory);
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    public function directories(string $directory): array
+    {
+        return array_values(array_map(
+            'basename',
+            $this->disk()->directories($directory)
+        ));
+    }
+
+    public function isEmpty(string $directory): bool
+    {
+        return $this->disk()->allFiles($directory) === [];
+    }
+
+    public function copy(string $source, string $destination): void
+    {
+        $this->disk()->copy($source, $destination);
+    }
+
+    public function readStream(string $path, int $offset = 0, ?int $length = null)
+    {
+        $absolute = $this->localPath($path);
+
+        if ($absolute === null || ! is_file($absolute)) {
+            return null;
+        }
+
+        $handle = @fopen($absolute, 'rb');
+
+        if ($handle === false) {
+            return null;
+        }
+
+        if ($offset > 0 && fseek($handle, $offset, SEEK_SET) !== 0) {
+            fclose($handle);
+
+            return null;
+        }
+
+        if ($length !== null) {
+            // Trim the stream to the requested slice so the caller can read it
+            // without knowing the length up front.
+            $remaining = $length;
+
+            $stream = @fopen('php://temp', 'w+b');
+
+            if ($stream === false) {
+                fclose($handle);
+
+                return null;
+            }
+
+            while ($remaining > 0 && ! feof($handle)) {
+                $buffer = fread($handle, (int) min(self::BUFFER_BYTES, $remaining));
+
+                if ($buffer === false || $buffer === '') {
+                    break;
+                }
+
+                fwrite($stream, $buffer);
+                $remaining -= strlen($buffer);
+            }
+
+            fclose($handle);
+            rewind($stream);
+
+            return $stream;
+        }
+
+        return $handle;
+    }
+
+    public function readHead(string $path, int $bytes): ?string
+    {
+        $handle = $this->readStream($path, 0, $bytes);
+
+        if (! is_resource($handle)) {
+            return null;
+        }
+
+        try {
+            $head = $bytes > 0 ? fread($handle, $bytes) : '';
+        } finally {
+            fclose($handle);
+        }
+
+        return is_string($head) ? $head : null;
     }
 
     public function localPath(string $path): ?string

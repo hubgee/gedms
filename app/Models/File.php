@@ -2,12 +2,12 @@
 
 namespace App\Models;
 
+use App\Contracts\UploadStorage;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
-use Illuminate\Support\Facades\Storage;
 use Throwable;
 
 class File extends Model
@@ -77,11 +77,11 @@ class File extends Model
             return;
         }
 
-        $disk = Storage::disk('edms');
+        $storage = app(UploadStorage::class);
 
         foreach ($paths as $path) {
             try {
-                $disk->delete($path);
+                $storage->delete($path);
             } catch (Throwable $e) {
                 report($e);
             }
@@ -95,8 +95,8 @@ class File extends Model
             }
 
             try {
-                if ($disk->allFiles($directory) === []) {
-                    $disk->deleteDirectory($directory);
+                if ($storage->isEmpty($directory)) {
+                    $storage->deleteDirectory($directory);
                 }
             } catch (Throwable $e) {
                 report($e);

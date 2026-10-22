@@ -2,10 +2,10 @@
 
 namespace App\Console\Commands;
 
+use App\Contracts\UploadStorage;
 use App\Models\UploadSession;
 use App\Services\UploadService;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Storage;
 
 /**
  * Housekeeping for resumable uploads.
@@ -109,14 +109,15 @@ class PruneUploads extends Command
      */
     private function pruneTemporaryDirectories(bool $dryRun): int
     {
-        $disk = Storage::disk('edms');
+        $storage = app(UploadStorage::class);
         $retentionHours = max(1, (int) config('uploads.prune_retention_hours'));
         $cutoff = now()->subHours($retentionHours);
 
         $removed = 0;
 
-        foreach ($disk->directories('tmp') as $directory) {
-            $uuid = basename($directory);
+        foreach ($storage->directories('tmp') as $name) {
+            $uuid = basename($name);
+            $directory = 'tmp/'.ltrim($name, '/');
             $session = UploadSession::query()->where('uuid', $uuid)->first();
 
             // A directory with no session row at all is orphaned debris.
@@ -145,7 +146,7 @@ class PruneUploads extends Command
                 continue;
             }
 
-            $disk->deleteDirectory($directory);
+            $storage->deleteDirectory($directory);
             $this->line("Removed temporary directory {$directory}.");
             $removed++;
         }
