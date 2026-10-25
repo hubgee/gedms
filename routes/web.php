@@ -10,8 +10,8 @@ use App\Http\Controllers\Admin\WorkflowDefinitionController;
 use App\Http\Controllers\ApprovalDashboardController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\FileController;
-use App\Http\Controllers\MemoController;
 use App\Http\Controllers\FolderController;
+use App\Http\Controllers\MemoController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\SearchController;
 use App\Http\Controllers\UploadController;
@@ -74,9 +74,16 @@ Route::middleware('auth')->group(function () {
         Route::get('audit-logs', [AuditLogController::class, 'index'])->name('audit-logs.index');
         Route::get('reports', fn () => view('admin.reports'))->name('reports.index');
         Route::get('storage-spaces', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'index'])->name('storage-spaces.index');
+        Route::get('storage-spaces/external-storage/oauth/{driver}/callback', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'oauthCallback'])
+            ->where('driver', '[a-z0-9_-]+')
+            ->name('storage-spaces.external-storage.oauth.callback');
         Route::get('storage-spaces/{space}/external-storage', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'edit'])->name('storage-spaces.external-storage.edit');
         Route::post('storage-spaces/{space}/external-storage', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'update'])->name('storage-spaces.external-storage.update');
+        Route::delete('storage-spaces/{space}/external-storage', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'destroy'])->name('storage-spaces.external-storage.destroy');
         Route::post('storage-spaces/{space}/external-storage/test', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'test'])->name('storage-spaces.external-storage.test');
+        Route::post('storage-spaces/{space}/external-storage/oauth/{driver}/connect', [\App\Http\Controllers\Admin\ExternalStorageController::class, 'oauthConnect'])
+            ->where('driver', '[a-z0-9_-]+')
+            ->name('storage-spaces.external-storage.oauth.connect');
     });
 
     Route::prefix('files')->name('files.')->group(function () {

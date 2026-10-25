@@ -231,7 +231,7 @@ return [
             'route'      => 'admin.storage-spaces.index',
             'icon'       => 'settings',
             'active'     => 'admin.storage-spaces*',
-            'permission' => 'manage-system',
+            'permission' => 'manage-storage-spaces',
         ],
     ],
 

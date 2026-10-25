@@ -328,11 +328,79 @@ class DropboxClient
     }
 
     /**
+     * How much of the Dropbox account is in use, and what it is allowed to
+     * use.
+     *
+     * Returns null when the API cannot answer; a quota read must never take a
+     * page down.
+     *
+     * @return array{used_bytes: int|null, allocated_bytes: int|null}|null
+     */
+    public function spaceUsage(): ?array
+    {
+        try {
+            $response = Http::withToken($this->accessToken())
+                ->withOptions(['timeout' => $this->timeout])
+                ->post($this->apiUrl.'/users/get_space_usage');
+
+            if (! $response->successful()) {
+                return null;
+            }
+
+            $decoded = $response->json();
+
+            if (! is_array($decoded)) {
+                return null;
+            }
+
+            return [
+                'used_bytes' => $this->integerOrNull($decoded['used'] ?? null),
+                'allocated_bytes' => $this->allocatedBytes($decoded['allocation'] ?? null),
+            ];
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * @param  mixed  $allocation  Dropbox's tagged union (individual or team)
+     */
+    protected function allocatedBytes(mixed $allocation): ?int
+    {
+        if (! is_array($allocation)) {
+            return null;
+        }
+
+        $allocated = $this->integerOrNull($allocation['allocated'] ?? null);
+
+        if ($allocated !== null) {
+            return $allocated;
+        }
+
+        // ".tag": "individual" nests the allocation one level down in some
+        // API versions.
+        foreach (['individual', 'team'] as $tag) {
+            $nested = $allocation[$tag] ?? null;
+
+            if (is_array($nested) && ($value = $this->integerOrNull($nested['allocated'] ?? null)) !== null) {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    protected function integerOrNull(mixed $value): ?int
+    {
+        return is_int($value) ? $value : (is_numeric($value) ? (int) $value : null);
+    }
+
+    /**
      * The current access token, renewed from the refresh token when needed.
      */
     public function accessToken(): string
     {
-        $cached = Cache::get(self::TOKEN_CACHE_KEY);
+        $cached = Cache::get($this->tokenCacheKey());
 
         if (is_string($cached) && $cached !== '') {
             return $cached;
@@ -362,9 +430,22 @@ class DropboxClient
 
         $expiresIn = is_array($decoded) ? (int) ($decoded['expires_in'] ?? 14400) : 14400;
 
-        Cache::put(self::TOKEN_CACHE_KEY, $token, now()->addSeconds(max(60, $expiresIn - 60)));
+        Cache::put($this->tokenCacheKey(), $token, now()->addSeconds(max(60, $expiresIn - 60)));
 
         return $token;
+    }
+
+    /**
+     * Cache key for this account's access token.
+     *
+     * The key includes the app key and refresh token because two spaces may be
+     * connected to two different Dropbox accounts. A single shared key would
+     * hand one account's token to the other, which is both a correctness and a
+     * privacy problem.
+     */
+    protected function tokenCacheKey(): string
+    {
+        return self::TOKEN_CACHE_KEY.'.'.sha1($this->appKey.'|'.$this->refreshToken);
     }
 
     /**

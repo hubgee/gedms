@@ -53,7 +53,7 @@ class S3UploadStorage implements UploadStorage
     private const BUFFER_BYTES = 1048576;
 
     public function __construct(
-        protected string $diskName = 'edms',
+        protected FilesystemAdapter|string $disk = 'edms',
     ) {}
 
     public function putChunk(string $path, string $sourcePath, ?string $expectedSha256 = null): void
@@ -617,11 +617,15 @@ class S3UploadStorage implements UploadStorage
 
     protected function disk(): FilesystemAdapter
     {
-        $disk = Storage::disk($this->diskName);
+        if ($this->disk instanceof FilesystemAdapter) {
+            $disk = $this->disk;
+        } else {
+            $disk = Storage::disk($this->disk);
+        }
 
         if (! method_exists($disk, 'getClient')) {
             throw new RuntimeException(
-                'The ['.$this->diskName.'] disk must use the s3 driver for object-storage uploads.'
+                'The S3 upload storage must be given an s3 disk (or a configured bucket).'
             );
         }
 
@@ -634,7 +638,7 @@ class S3UploadStorage implements UploadStorage
 
         if (! $client instanceof S3Client) {
             throw new RuntimeException(
-                'The ['.$this->diskName.'] disk must use the s3 driver for object-storage uploads.'
+                'The S3 upload storage must be given an s3 disk for object-storage uploads.'
             );
         }
 
@@ -646,7 +650,7 @@ class S3UploadStorage implements UploadStorage
         $bucket = $this->disk()->getConfig()['bucket'] ?? null;
 
         if (! is_string($bucket) || $bucket === '') {
-            throw new RuntimeException('The ['.$this->diskName.'] disk has no bucket configured.');
+            throw new RuntimeException('The S3 upload storage has no bucket configured.');
         }
 
         return $bucket;

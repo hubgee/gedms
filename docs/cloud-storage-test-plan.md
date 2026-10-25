@@ -7,16 +7,16 @@ write and cannot see it for a moment, it runs out of quota, it refuses to copy
 an object because a part is too small, and it charges for every byte that moves.
 
 This plan describes how those conditions are reproduced and asserted. It covers
-three substitute backends, three independent layers of fault injection, the
+several substitute backends, three independent layers of fault injection, the
 scenario matrix that ties them together, and the limits of what the current
 implementation can do.
 
-The Drive sidebar's **External Storage** entry is still a "Coming soon"
-placeholder in `resources/views/files/partials/drive-nextcloud.blade.php`, so
-none of this is that feature. The integration is the byte-store seam plus the
-test harness that prove the upload pipeline works against a real cloud provider
-today, and the foundation the feature will be built on later (see the roadmap at
-the end).
+The External Storage feature is now implemented in Phase 4: an administrator
+opens **Administration → Storage Spaces**, picks a provider, and the space's
+files are routed through that provider's `UploadStorage` backend. The first half
+of this document describes the byte-store seam and the fault harness that prove
+the pipeline is safe on a cloud backend; the second half documents provider
+setup, the admin flow and the remaining manual soak work.
 
 ## Requirement map
 
@@ -42,14 +42,21 @@ the same time:
 | `copy()` | filesystem copy | server-side `CopyObject` | `files/copy_v2` |
 | `localPath()` | absolute path | `null` | `null` |
 
+Google Drive and OneDrive implement the same contract. Drive is id-based, so the
+client resolves a path to a folder id and caches it for the request; OneDrive is
+path-addressable and maps EDMS paths directly onto Graph paths. Neither can join
+chunks server-side, so assembly downloads the chunks and uploads the
+concatenation, exactly like Dropbox.
+
 The pipeline never needs a local path: the executable-payload check and the MIME
 sniff read `readHead()` instead of opening the file. That is the change that
 makes the cloud backends honest instead of silently skipping checks.
 
-The driver is chosen by `UPLOAD_STORAGE_DRIVER` (`local`, `s3`, `dropbox`). The
-binding is **scoped**, not a singleton: the fault injector keeps a little
-per-request state (the stale reads), and that state must survive within one
-request or one queue job but must not leak into the next job.
+The driver is chosen by `UPLOAD_STORAGE_DRIVER` (`local`, `s3`, `dropbox`,
+`google`, `onedrive`). A space can override it with its own encrypted
+configuration. The binding is **scoped**, not a singleton: the fault injector
+keeps a little per-request state (the stale reads), and that state must survive
+within one request or one queue job but must not leak into the next job.
 
 ## Invariants that must hold on every backend
 
@@ -190,7 +197,7 @@ Nothing is mocked.
 |---|---|---|
 | `--preset=` | config | Fault profile from the table above |
 | `--list` | | Print the presets and exit |
-| `--driver=` | `uploads.storage_driver` | `local`, `s3` or `dropbox` |
+| `--driver=` | `uploads.storage_driver` | `local`, `s3`, `dropbox`, `google` or `onedrive` |
 | `--bytes=` | 1 MiB | Synthetic file size |
 | `--chunk-bytes=` | 64 KiB | Chunk size |
 | `--attempts=` | 3 | Retries per failing phase |
@@ -280,37 +287,34 @@ session strictly in order, and the whole file moves back through the application
 (roughly 2x egress). That makes it a good stress test for the ordering and
 cleanup logic.
 
-Setup:
+Setup (admin UI, recommended):
 
 1. Create an app at <https://www.dropbox.com/developers/apps> with **scoped
    access** and **App folder** access.
 2. Enable the scopes `files.content.write`, `files.content.read` and
    `files.metadata.read`.
-3. Authorise once with `token_access_type=offline`:
+3. In the Dropbox app console, add the exact callback URL shown on the space's
+   edit page:
+   `.../admin/storage-spaces/external-storage/oauth/dropbox/callback`.
+   The flow uses PKCE, so Dropbox accepts `http://` for a non-localhost host;
+   production should still use HTTPS.
+4. In **Administration → Storage Spaces**, open the space, choose **Dropbox**,
+   enter the app key and secret, and click **Connect with Dropbox**. The
+   callback exchanges the code and stores the refresh token encrypted on the
+   space. Click **Test connection** to confirm access.
+5. To make Dropbox the global default for every space without its own
+   configuration, set the `.env` values below.
 
-   ```text
-   https://www.dropbox.com/oauth2/authorize?client_id=<APP_KEY>&response_type=code&token_access_type=offline
-   ```
+```dotenv
+UPLOAD_STORAGE_DRIVER=dropbox
+DROPBOX_APP_KEY=...
+DROPBOX_APP_SECRET=...
+DROPBOX_REFRESH_TOKEN=...
+DROPBOX_ROOT=/edms
+```
 
-4. Exchange the code for a refresh token:
-
-   ```powershell
-   curl.exe https://api.dropboxapi.com/oauth2/token `
-     -d grant_type=authorization_code `
-     -d code=<CODE> `
-     -d client_id=<APP_KEY> `
-     -d client_secret=<APP_SECRET>
-   ```
-
-5. Configure:
-
-   ```dotenv
-   UPLOAD_STORAGE_DRIVER=dropbox
-   DROPBOX_APP_KEY=...
-   DROPBOX_APP_SECRET=...
-   DROPBOX_REFRESH_TOKEN=...
-   DROPBOX_ROOT=/edms
-   ```
+If the deployment terminates TLS at a proxy and the derived callback URL is
+wrong, set `DROPBOX_REDIRECT_URI` to the exact registered URL.
 
 ```powershell
 php artisan edms:upload-chaos --preset=clean --driver=dropbox --bytes=1048576 --chunk-bytes=262144
@@ -325,6 +329,56 @@ Notes:
   re-uploads every byte. A 1 GB run is enough to prove the path; the cost model
   is documented below.
 
+### Google Drive
+
+1. Create an OAuth client (type **Web application**) in the Google Cloud
+   Console and enable the Google Drive API.
+2. Add the callback URL from the space's edit page as an authorised redirect
+   URI: `.../admin/storage-spaces/external-storage/oauth/google/callback`.
+3. In **Administration → Storage Spaces**, choose **Google Drive**, enter the
+   client id and secret, and click **Connect with Google Drive**.
+4. Grant the `drive` scope. Google returns a refresh token only when consent is
+   prompted, which the driver requests explicitly.
+
+Global fallback:
+
+```dotenv
+UPLOAD_STORAGE_DRIVER=google
+GOOGLE_DRIVE_CLIENT_ID=...
+GOOGLE_DRIVE_CLIENT_SECRET=...
+GOOGLE_DRIVE_REFRESH_TOKEN=...
+GOOGLE_DRIVE_ROOT=/edms
+```
+
+Drive is id-based, so folder lookups are cached per request. Assembly downloads
+the chunks and uploads the concatenation; the same egress trade-off as Dropbox
+applies.
+
+### Microsoft OneDrive
+
+1. Register an application in Microsoft Entra (Azure AD).
+2. Add a **Web** redirect URI matching the space's edit page:
+   `.../admin/storage-spaces/external-storage/oauth/onedrive/callback`.
+3. Grant the delegated permissions `Files.ReadWrite.All` and `offline_access`.
+4. In **Administration → Storage Spaces**, choose **Microsoft OneDrive**, enter
+   the application (client) id and client secret, leave the tenant as `common`
+   for personal accounts (or use the tenant id/domain for an organisation), and
+   click **Connect with Microsoft OneDrive**.
+
+Global fallback:
+
+```dotenv
+UPLOAD_STORAGE_DRIVER=onedrive
+ONEDRIVE_CLIENT_ID=...
+ONEDRIVE_CLIENT_SECRET=...
+ONEDRIVE_REFRESH_TOKEN=...
+ONEDRIVE_TENANT=common
+ONEDRIVE_ROOT=/edms
+```
+
+The driver targets the signed-in user's OneDrive (`/me/drive`); SharePoint site
+libraries are not part of this driver.
+
 ## Scenario matrix
 
 Every row is a test that must pass before the cloud backends are considered
@@ -333,7 +387,7 @@ nightly runs.
 
 | # | Scenario | Layer / setup | Pass criteria | Automated |
 |---|---|---|---|---|
-| 1 | Clean round trip, all three drivers | `--preset=clean --driver=...` | `ok`, `verified`, SHA-256 matches | Yes (local, Dropbox fake) |
+| 1 | Clean round trip, every driver | `--preset=clean --driver=...` | `ok`, `verified`, SHA-256 matches | Yes (local, Dropbox fake; Google/OneDrive client URLs faked) |
 | 2 | Transient provider failure | `flaky` or `UPLOAD_FAULT_FAILURE_RATE=0.2` | 422 on `chunk`, no index row, retry then completes | Yes |
 | 3 | Quota exhausted | `quota-exhausted` | 422 "quota is exhausted", session `pending`, no rows | Yes |
 | 4 | Connection cut mid-chunk | `drop-mid-transfer` (chunk > 1 MiB) | Short object stored, chunk reported missing, retry overwrites it, final hash matches | Yes |
@@ -361,6 +415,11 @@ Run the cloud half of the suite:
 ```powershell
 php artisan test --filter="CloudUploadStorage"
 php artisan test --filter="S3UploadStorage"
+php artisan test --filter="CloudOAuth"
+php artisan test --filter="GoogleDriveClient"
+php artisan test --filter="OneDriveClient"
+php artisan test --filter="StorageDriverRegistry"
+php artisan test --filter="StorageUsageReporter"
 php artisan test --filter="Upload"
 ```
 
@@ -368,6 +427,13 @@ php artisan test --filter="Upload"
 |---|---|
 | `tests/Feature/Uploads/CloudUploadStorageTest.php` | Fault decorator: transient failure, quota, mid-chunk truncation and retry, stale reads, wrong hash, assembly mismatch. Dropbox: ordered appends `[0, 8, 16]`, ranged read `bytes=4-9`, executable rejection with object deletion, download through `FileService`, server-side copy, truncated chunk reconciliation, temp cleanup, factory driver selection, unknown driver, missing credentials, local driver makes no HTTP calls |
 | `tests/Unit/S3UploadStorageTest.php` | Multipart-copy decision: 5 MiB minimum, last-part exception, 10 000-part ceiling, 5 GiB copy ceiling, unreadable sizes |
+| `tests/Unit/Uploads/PkceTest.php` | Verifier length and charset, uniqueness, S256 challenge, query parameters |
+| `tests/Feature/Uploads/CloudOAuthTest.php` | PKCE and offline-access parameters for Dropbox, Google and OneDrive; token exchange includes the verifier; provider errors and missing refresh tokens surface |
+| `tests/Feature/Uploads/StorageDriverRegistryTest.php` | Every configured driver resolves, keys and field schemas are complete, only OAuth drivers expose an OAuth provider, unknown keys fail, config-only driver addition works |
+| `tests/Feature/Uploads/StorageUsageReporterTest.php` | Application sizes, provider quota through `ReportsStorageQuota`, configured quota precedence, no probe unless requested, backends without quota reporting |
+| `tests/Feature/Uploads/GoogleDriveClientTest.php` | Resumable upload, copy replaces the destination, ranged `readHead`, quota parsing, missing items |
+| `tests/Feature/Uploads/OneDriveClientTest.php` | Simple content upload, item lookup, quota parsing, copy replaces the destination and sets the parent folder, missing items |
+| `tests/Feature/Admin/ExternalStorageControllerTest.php` | Driver list, callback URL, encrypted per-space config, blank secret retention, provider switching drops old secrets, explicit local override, validation, OAuth connect with PKCE, callback stores the refresh token, forged state rejection, admin authorisation |
 | `tests/Support/FakeDropbox.php` | In-memory Dropbox API v2 for `Http::fake()`: token, upload, upload sessions with strict offset checks, ranged download, metadata, delete, list, copy |
 
 The Dropbox fake is deliberately strict about offsets: an out-of-order append
@@ -389,10 +455,11 @@ defined behaviour and a test.
 | Dropbox assembly egress | ~2x file size | Downloads each chunk and re-uploads it into the session | Egress accounting on a 1 GB run |
 | Dropbox append order | strict | Chunks are appended in index order; an offset mismatch fails the assembly | `CloudUploadStorageTest` ordered-append test |
 | No local path on cloud | n/a | `localPath()` returns `null`; checks use `readHead()` | Executable-payload test on Dropbox |
+| Verification read-back | 64 MiB | Larger files are trusted on size after an upload, because hashing them means downloading them again; the bytes were hashed locally before upload | `verify_read_back_limit` in `config/uploads.php` |
 | Read-after-write | varies | `size()` returns `null` on a failed HEAD, so reconcile treats the chunk as missing instead of trusting the index | `eventually-consistent` preset |
 | Incomplete multipart uploads | n/a | Aborted on handled failures; lifecycle rule covers killed workers | Bucket lifecycle + crash test |
 | Provider errors surface | n/a | The `edms-cloud` disk uses `throw => true`, so a failed provider call raises instead of returning `false` | Point the disk at a stopped MinIO |
-| Dropbox base URL | hard-coded | Wire-level proxying needs certificate interception; layer 1 + layer 3 cover it for now | Roadmap: configurable endpoint |
+| Dropbox base URL | configurable | `DROPBOX_API_URL` / `DROPBOX_CONTENT_URL` let a proxy or a fake sit in front | Point the URL at a local fake |
 
 One deliberate trade-off: the Dropbox assembly re-downloads every chunk. For a
 10 GB file that is 10 GB down plus 10 GB up, so assembly is the dominant cost.
@@ -424,30 +491,36 @@ foreach ($preset in $presets) {
 `quota-exhausted` is excluded from the loop because exit code `1` is the correct
 outcome; run it separately and assert the error message instead.
 
-## Roadmap to the real External Storage feature
+## Roadmap
 
-**Phase 1, present.** Byte-store seam, local/S3/Dropbox drivers, fault decorator,
-chaos harness, automated cloud tests. No user-facing change.
+**Phase 1, complete.** Byte-store seam, local/S3/Dropbox drivers, fault decorator,
+chaos harness, automated cloud tests.
 
 **Phase 2, staging soak.** MinIO and Toxiproxy in CI or a nightly job; a 10 GB
 S3 run; a 1 GB Dropbox run; bucket lifecycle and cleanup verified.
 
-**Phase 3, hardening.** Credentials from a secret store, per-space buckets or
-prefixes, provider health checks, retry/backoff tuned from soak data, an
-incomplete-upload metrics/alarm, configurable provider endpoints for wire-level
-Dropbox testing.
+**Phase 3, hardening, complete.** Per-space credentials encrypted with the
+application key, provider health checks, configurable endpoints, read-back
+limits and a registry that hides provider specifics from the controller.
 
-**Phase 4, the feature.** Replace the "Coming soon" entry with a real external
-storage configuration: an admin adds a provider, the app tests the connection,
-stores credentials encrypted, and routes a space's files through the right
-`UploadStorage`. The driver factory and the contract already provide the seam;
-the remaining work is UI, credentials, authorisation and quota reporting.
+**Phase 4, the feature, complete.** The "Coming soon" placeholder is replaced by
+**Administration → Storage Spaces → External storage**. The admin picks from
+`local`, any S3-compatible store, Dropbox, Google Drive or OneDrive, fills the
+fields the driver declares, tests the connection, and connects OAuth providers
+with a single button. The configuration is encrypted on the space; spaces
+without one inherit the global driver, and **Use global default** removes an
+override.
+
+**Phase 5, follow-ups.** SharePoint document libraries (the current OneDrive
+driver targets `/me/drive`), Microsoft Graph delta-based listings for very large
+folders, a provider-specific egress estimate in the UI, and a scheduled quota
+probe for spaces that opt into it.
 
 ## Appendix: environment reference
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `UPLOAD_STORAGE_DRIVER` | `local` | `local`, `s3` or `dropbox` |
+| `UPLOAD_STORAGE_DRIVER` | `local` | `local`, `s3`, `dropbox`, `google` or `onedrive` |
 | `UPLOAD_LOCAL_DISK` | `edms` | Disk used by the local driver |
 | `UPLOAD_CLOUD_DISK` | `edms-cloud` | S3 disk used by the S3 driver |
 | `UPLOAD_FAULT_LATENCY_MS` | `0` | Per-operation delay |
@@ -458,8 +531,17 @@ the remaining work is UI, credentials, authorisation and quota reporting.
 | `UPLOAD_FAULT_QUOTA_EXCEEDED` | `false` | Make every operation report a full bucket |
 | `UPLOAD_FAULT_EVENTUAL_CONSISTENCY_READS` | `0` | Stale reads after each write |
 | `DROPBOX_APP_KEY` / `DROPBOX_APP_SECRET` / `DROPBOX_REFRESH_TOKEN` | empty | Dropbox OAuth credentials |
+| `DROPBOX_APP_KEY_FILE` / `DROPBOX_APP_SECRET_FILE` / `DROPBOX_REFRESH_TOKEN_FILE` | empty | Docker-style secret files; take precedence over the inline values |
 | `DROPBOX_ROOT` | `/edms` | Folder inside the Dropbox app that holds EDMS files |
 | `DROPBOX_TIMEOUT` | `120` | Seconds before a Dropbox request is abandoned |
+| `DROPBOX_REDIRECT_URI` | derived | Exact callback URL registered on the Dropbox app |
+| `GOOGLE_DRIVE_CLIENT_ID` / `GOOGLE_DRIVE_CLIENT_SECRET` / `GOOGLE_DRIVE_REFRESH_TOKEN` | empty | Google OAuth credentials |
+| `GOOGLE_DRIVE_ROOT` | `/edms` | Folder inside Google Drive |
+| `GOOGLE_DRIVE_REDIRECT_URI` | derived | Exact callback URL registered on the Google OAuth client |
+| `ONEDRIVE_CLIENT_ID` / `ONEDRIVE_CLIENT_SECRET` / `ONEDRIVE_REFRESH_TOKEN` | empty | Microsoft OAuth credentials |
+| `ONEDRIVE_TENANT` | `common` | Microsoft tenant id/domain, or `common` for personal accounts |
+| `ONEDRIVE_ROOT` | `/edms` | Folder inside OneDrive |
+| `ONEDRIVE_REDIRECT_URI` | derived | Exact callback URL registered on the Microsoft app |
 | `AWS_*` | see `.env.example` | S3-compatible endpoint, credentials and bucket |
 
 ## Appendix: troubleshooting
@@ -467,11 +549,15 @@ the remaining work is UI, credentials, authorisation and quota reporting.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Every operation says "quota is exhausted" | `UPLOAD_FAULT_QUOTA_EXCEEDED=true` left in `.env` | Unset it; the harness presets do not write to `.env` |
-| "Unknown upload storage driver" | Typo in `UPLOAD_STORAGE_DRIVER` | Use `local`, `s3` or `dropbox` |
+| "Unknown upload storage driver" | Typo in `UPLOAD_STORAGE_DRIVER` or a removed driver | Use `local`, `s3`, `dropbox`, `google` or `onedrive` |
 | "The [edms-cloud] disk has no bucket configured" | `AWS_BUCKET` unset | Set bucket, endpoint and credentials |
 | S3 returns 403 | Wrong region, endpoint or path-style setting | Match the provider's documented endpoint; MinIO needs `AWS_USE_PATH_STYLE_ENDPOINT=true` |
 | Multipart copy never happens | Chunks are below 5 MiB (the test suite's tiny chunks, for example) | Run with `--chunk-bytes` at or above `5242880` |
-| Dropbox returns 401 | Refresh token expired or scopes missing | Re-authorise with `token_access_type=offline` and the three file scopes |
+| Dropbox returns 401 | Refresh token expired or scopes missing | Click **Connect with Dropbox** again; the UI requests `token_access_type=offline` and the three file scopes |
+| Dropbox says `invalid_redirect_uri` | The callback URL is not registered on the app | Copy the URL shown on the edit page into the Dropbox app console; use `DROPBOX_REDIRECT_URI` only when a proxy changes the public URL |
+| Google says `redirect_uri_mismatch` | The authorised redirect URI differs by scheme, host, port or path | Register the exact URL shown on the edit page |
+| Microsoft says `AADSTS50011` | The redirect URI is not registered on the app registration | Add the exact URL shown on the edit page under **Web** redirect URIs |
+| A provider connection works but "Test connection" fails | The token was issued for a different account, or the root folder is not writable | Reconnect, and check the root folder and scopes |
 | Dropbox assembly is slow | Sequential download plus upload | Expected; use smaller test files or prefer S3 for throughput |
 | Assembly says a chunk is missing | Stale read or a vanished chunk | Re-run the harness, or let the client re-send; this is the reconciler working |
 | Temp files appear under `storage/app/private/edms/tmp` | A failed run on the local driver | `php artisan edms:prune-uploads --ttl`, or delete the `tmp/{uuid}` directory |

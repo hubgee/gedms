@@ -5,6 +5,7 @@ namespace App\Providers;
 use App\Contracts\UploadStorage;
 use App\Listeners\LogLogout;
 use App\Listeners\LogSuccessfulLogin;
+use App\Services\Uploads\StorageDriverRegistry;
 use App\Services\Uploads\UploadStorageFactory;
 use Illuminate\Auth\Events\Login;
 use Illuminate\Auth\Events\Logout;
@@ -21,6 +22,10 @@ class AppServiceProvider extends ServiceProvider
         // per queue job) keeps the state of the fault injector meaningful, and
         // it is released before the next job starts.
         $this->app->scoped(UploadStorageFactory::class, fn (Application $app) => new UploadStorageFactory($app));
+
+        // One registry per process: the driver descriptors are stateless and
+        // only reflect configuration.
+        $this->app->singleton(StorageDriverRegistry::class);
 
         $this->app->scoped(
             UploadStorage::class,

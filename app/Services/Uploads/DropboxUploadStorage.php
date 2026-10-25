@@ -2,6 +2,7 @@
 
 namespace App\Services\Uploads;
 
+use App\Contracts\ReportsStorageQuota;
 use App\Contracts\UploadStorage;
 use RuntimeException;
 use Throwable;
@@ -25,7 +26,7 @@ use Throwable;
  * behaviour the test plan wants to exercise: a slow, chatty, order-sensitive
  * cloud round trip in the middle of the upload.
  */
-class DropboxUploadStorage implements UploadStorage
+class DropboxUploadStorage implements ReportsStorageQuota, UploadStorage
 {
     /** 1 MiB buffer: hashing a chunk never loads it into memory. */
     private const BUFFER_BYTES = 1048576;
@@ -305,30 +306,13 @@ class DropboxUploadStorage implements UploadStorage
     }
 
     /**
-     * Whether a previous attempt already produced the finished file.
+     * Account-level usage and allocation, when Dropbox reports it.
+     *
+     * @return array{used_bytes: int|null, allocated_bytes: int|null}|null
+     */
+    public function spaceUsage(): ?array
     {
-        $metadata = $this->client->metadata($destination);
-
-        if ($metadata === null) {
-            return false;
-        }
-
-        if ((int) ($metadata['size'] ?? -1) !== $expectedBytes) {
-            return false;
-        }
-
-        if ($expectedSha256 === null) {
-            return true;
-        }
-
-        if ($expectedBytes > $this->verifyReadBackLimit) {
-            // Reading a 10 GB object back to hash it costs as much as
-            // assembling it again. The size already rules out a partial
-            // assembly, and the assembly itself verified the hash.
-            return true;
-        }
-
-        return $this->hashMatches($destination, $expectedSha256);
+        return $this->client->spaceUsage();
     }
 
     /**

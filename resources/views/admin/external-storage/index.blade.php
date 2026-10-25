@@ -48,12 +48,15 @@
                             ?? $space->ownerMinistry?->name
                             ?? $space->ownerUser?->name
                             ?? '—';
+                        $driverLabel = $space->storage_driver
+                            ? (($driverLabels[$space->storage_driver] ?? null)?->label() ?? $space->storage_driver)
+                            : 'global default';
                     @endphp
                     <tr>
                         <td class="px-4 py-3 text-slate-800">{{ $space->name ?? 'Space #'.$space->id }}</td>
                         <td class="px-4 py-3 text-slate-600">{{ $space->type }}</td>
                         <td class="px-4 py-3 text-slate-600">{{ $owner }}</td>
-                        <td class="px-4 py-3 text-slate-600">{{ $space->storage_driver ?: 'global default' }}</td>
+                        <td class="px-4 py-3 text-slate-600">{{ $driverLabel }}</td>
                         <td class="px-4 py-3 text-right">
                             <a href="{{ route('admin.storage-spaces.external-storage.edit', $space) }}" class="text-blue-600 hover:underline">Configure</a>
                         </td>

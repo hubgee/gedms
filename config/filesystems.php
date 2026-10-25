@@ -45,10 +45,11 @@ return [
     |
     | Supported drivers: "local", "ftp", "sftp", "s3"
     |
-    | Dropbox is deliberately absent: the Dropbox backend is reached through
-    | the UploadStorage contract, not through a Laravel disk, because Dropbox
-    | has no keys and no partial writes and therefore cannot be mapped onto
-    | Flysystem without losing the guarantees the upload pipeline relies on.
+    | Dropbox, Google Drive and OneDrive are deliberately absent: those
+    | backends are reached through the UploadStorage contract, not through a
+    | Laravel disk, because they have no keys and no partial writes and
+    | therefore cannot be mapped onto Flysystem without losing the guarantees
+    | the upload pipeline relies on.
     |
     */
 
