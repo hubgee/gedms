@@ -5,6 +5,7 @@ namespace App\Services\Uploads;
 use App\Contracts\UploadStorage;
 use App\Models\StorageSpace;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 use Throwable;
 
@@ -84,6 +85,11 @@ class UploadStorageFactory
         try {
             return $this->driver($driver ?? (string) config('uploads.storage_driver', 'local'), $overrides)->healthCheck();
         } catch (Throwable $e) {
+            Log::warning('Upload storage health check failed', [
+                'driver' => $driver,
+                'error' => $e->getMessage(),
+            ]);
+
             return false;
         }
     }

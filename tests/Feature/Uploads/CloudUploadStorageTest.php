@@ -434,6 +434,57 @@ class CloudUploadStorageTest extends UploadTestCase
         $this->assertTrue(app(UploadStorage::class)->healthCheck());
     }
 
+    public function test_the_dropbox_backend_creates_missing_parent_folders_before_writing(): void
+    {
+        $fake = $this->useDropbox();
+
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->beginUpload($user, $space, null, 8);
+
+        $this->uploadService()->putChunk($session, $user, 0, $this->makeChunk(8));
+
+        $created = array_column($fake->callsTo('files/create_folder_v2'), 'path');
+
+        $this->assertContains('/edms/tmp', $created);
+        $this->assertContains('/edms/tmp/'.$session->uuid, $created);
+    }
+
+    public function test_dropbox_rpc_requests_send_a_json_object_body(): void
+    {
+        config([
+            'cache.default' => 'array',
+            'uploads.dropbox.app_key' => 'test-key',
+            'uploads.dropbox.app_secret' => 'test-secret',
+            'uploads.dropbox.refresh_token' => 'test-refresh',
+            'uploads.dropbox.root' => '/edms',
+        ]);
+
+        Http::fake([
+            'api.dropboxapi.com/oauth2/token' => Http::response([
+                'access_token' => 'fake-token',
+                'expires_in' => 3600,
+            ]),
+            'api.dropboxapi.com/2/files/list_folder' => Http::response([
+                'entries' => [],
+                'has_more' => false,
+            ]),
+        ]);
+
+        $client = new DropboxClient('test-key', 'test-secret', 'test-refresh', '/edms', 30);
+        $client->listChildren('');
+
+        Http::assertSent(function ($request) {
+            if (! str_contains($request->url(), '/files/list_folder')) {
+                return false;
+            }
+
+            $decoded = json_decode($request->body(), true);
+
+            return is_array($decoded) && ! array_is_list($decoded);
+        });
+    }
+
     public function test_the_local_backend_reports_healthy(): void
     {
         $this->assertTrue(app(UploadStorage::class)->healthCheck());

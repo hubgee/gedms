@@ -144,7 +144,7 @@ class ExternalStorageController extends Controller
 
         return back()->with($ok ? 'success' : 'error', $ok
             ? 'Connection successful.'
-            : 'Connection failed. Check the credentials and endpoint.');
+            : 'Connection failed. Check the credentials, scopes and root folder. The provider response is in storage/logs/laravel.log.');
     }
 
     /**

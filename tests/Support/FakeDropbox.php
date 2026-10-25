@@ -26,6 +26,9 @@ class FakeDropbox
     /** @var array<string, string> Dropbox path => content. */
     protected array $files = [];
 
+    /** @var array<string, true> Dropbox folder paths that exist. */
+    protected array $folders = [];
+
     /** @var array<string, array{offset: int, bytes: string}> Upload sessions. */
     protected array $sessions = [];
 
@@ -36,7 +39,10 @@ class FakeDropbox
 
     public function __construct(
         protected string $root = '/edms',
-    ) {}
+    ) {
+        // The root is created by the client on first use; the fake mirrors
+        // that so a missing ensureParentFolder() call is caught.
+    }
 
     /**
      * Register the fake with the HTTP client.
@@ -94,6 +100,16 @@ class FakeDropbox
     }
 
     /**
+     * Whether a folder exists.
+     */
+    public function hasFolder(string $path): bool
+    {
+        $normalised = $this->normalise($path);
+
+        return $normalised === '/' || isset($this->folders[$normalised]);
+    }
+
+    /**
      * Every call made against the API, in order.
      *
      * @return array<int, array{endpoint: string, path: string, offset: int, bytes: int, range: string}>
@@ -139,11 +155,17 @@ class FakeDropbox
 
         switch ($endpoint) {
             case 'files/upload':
-                $this->files[$this->normalise($argument['path'])] = (string) $request->body();
+                $path = $argument['path'] ?? '';
 
-                $this->record($endpoint, $argument['path'] ?? '', 0, strlen((string) $request->body()));
+                if (! $this->parentExists($path)) {
+                    return $this->conflict('path/not_found');
+                }
 
-                return $this->response($this->metadata($argument['path']));
+                $this->files[$this->normalise($path)] = (string) $request->body();
+
+                $this->record($endpoint, $path, 0, strlen((string) $request->body()));
+
+                return $this->response($this->metadata($path));
 
             case 'files/upload_session/start':
                 $id = 'session-'.(++$this->sessionCounter);
@@ -190,6 +212,11 @@ class FakeDropbox
                 }
 
                 $path = $argument['path'] ?? '';
+
+                if (! $this->parentExists($path)) {
+                    return $this->conflict('path/not_found');
+                }
+
                 $this->files[$this->normalise($path)] = $this->sessions[$id]['bytes'];
                 unset($this->sessions[$id]);
 
@@ -214,21 +241,67 @@ class FakeDropbox
 
             case 'files/get_metadata':
                 $path = $argument['path'] ?? '';
+                $normalised = $this->normalise($path);
 
-                if (! $this->has($path)) {
+                if (isset($this->folders[$normalised])) {
+                    return $this->response($this->folderMetadata($normalised));
+                }
+
+                if (! $this->has($normalised)) {
                     return $this->conflict('path/not_found');
                 }
 
                 return $this->response($this->metadata($path));
 
-            case 'files/delete_v2':
+            case 'files/create_folder_v2':
                 $path = $argument['path'] ?? '';
+                $normalised = $this->normalise($path);
 
-                if (! $this->has($path)) {
+                if ($this->has($normalised)) {
+                    return $this->conflict('path/conflict/file');
+                }
+
+                if (isset($this->folders[$normalised])) {
+                    return $this->conflict('path/conflict/folder');
+                }
+
+                if (! $this->parentExists($path)) {
                     return $this->conflict('path/not_found');
                 }
 
-                unset($this->files[$this->normalise($path)]);
+                $this->folders[$normalised] = true;
+
+                $this->record($endpoint, $path, 0, 0);
+
+                return $this->response(['metadata' => $this->folderMetadata($normalised)]);
+
+            case 'files/delete_v2':
+                $path = $argument['path'] ?? '';
+                $normalised = $this->normalise($path);
+
+                if (isset($this->folders[$normalised])) {
+                    foreach (array_keys($this->files) as $filePath) {
+                        if ($filePath === $normalised || str_starts_with($filePath, $normalised.'/')) {
+                            unset($this->files[$filePath]);
+                        }
+                    }
+
+                    foreach (array_keys($this->folders) as $folderPath) {
+                        if ($folderPath === $normalised || str_starts_with($folderPath, $normalised.'/')) {
+                            unset($this->folders[$folderPath]);
+                        }
+                    }
+
+                    $this->record($endpoint, $path, 0, 0);
+
+                    return $this->response($this->folderMetadata($normalised));
+                }
+
+                if (! $this->has($normalised)) {
+                    return $this->conflict('path/not_found');
+                }
+
+                unset($this->files[$normalised]);
 
                 $this->record($endpoint, $path, 0, 0);
 
@@ -268,6 +341,20 @@ class FakeDropbox
                     $folders[substr($remainder, 0, $slash)] = true;
                 }
 
+                foreach (array_keys($this->folders) as $folderPath) {
+                    if (! str_starts_with($folderPath, $prefix)) {
+                        continue;
+                    }
+
+                    $remainder = substr($folderPath, strlen($prefix));
+
+                    if ($remainder === '' || str_contains($remainder, '/')) {
+                        continue;
+                    }
+
+                    $folders[$remainder] = true;
+                }
+
                 foreach (array_keys($folders) as $name) {
                     $entries[] = [
                         '.tag' => 'folder',
@@ -287,11 +374,21 @@ class FakeDropbox
                     return $this->conflict('path/not_found');
                 }
 
+                if (! $this->parentExists($to)) {
+                    return $this->conflict('path/not_found');
+                }
+
                 $this->files[$this->normalise($to)] = $content;
 
                 $this->record($endpoint, $to, 0, strlen($content));
 
                 return $this->response($this->metadata($to));
+
+            case 'users/get_space_usage':
+                return $this->response([
+                    'used' => 0,
+                    'allocation' => ['allocated' => 0],
+                ]);
         }
 
         return $this->response(['error_summary' => 'unknown_endpoint/'], 400);
@@ -333,6 +430,32 @@ class FakeDropbox
         ];
     }
 
+    protected function folderMetadata(string $path): array
+    {
+        $normalised = $this->normalise($path);
+
+        return [
+            '.tag' => 'folder',
+            'name' => basename($normalised),
+            'path_lower' => $normalised,
+        ];
+    }
+
+    protected function parentExists(string $path): bool
+    {
+        $parent = $this->parentPath($path);
+
+        return $parent === '/' || isset($this->folders[$parent]);
+    }
+
+    protected function parentPath(string $path): string
+    {
+        $normalised = $this->normalise($path);
+        $slash = strrpos($normalised, '/');
+
+        return $slash === false || $slash === 0 ? '/' : substr($normalised, 0, $slash);
+    }
+
     protected function conflict(string $summary): PromiseInterface
     {
         return $this->response(['error_summary' => $summary], 409);
@@ -350,11 +473,27 @@ class FakeDropbox
 
     protected function argument(Request $request): array
     {
-        $header = $request->header('Dropbox-API-Arg')[0] ?? '{}';
+        $header = $request->header('Dropbox-API-Arg')[0] ?? null;
 
-        $decoded = json_decode($header, true);
+        if (is_string($header) && $header !== '') {
+            $decoded = json_decode($header, true);
 
-        return is_array($decoded) ? $decoded : [];
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+
+        $body = (string) $request->body();
+
+        if ($body !== '' && $body !== '[]') {
+            $decoded = json_decode($body, true);
+
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+
+        return [];
     }
 
     protected function endpoint(string $url): string

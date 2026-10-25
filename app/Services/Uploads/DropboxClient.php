@@ -5,7 +5,9 @@ namespace App\Services\Uploads;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
+use Throwable;
 
 /**
  * Thin Dropbox API v2 client for the upload byte store.
@@ -28,6 +30,9 @@ class DropboxClient
     protected const TOKEN_URL = 'https://api.dropboxapi.com/oauth2/token';
 
     protected const TOKEN_CACHE_KEY = 'edms.dropbox.access_token';
+
+    /** @var array<string, true> Folders already created or verified in this request. */
+    protected array $ensuredFolders = [];
 
     public function __construct(
         protected string $appKey,
@@ -84,6 +89,8 @@ class DropboxClient
      */
     public function upload(string $path, string $localFile): void
     {
+        $this->ensureParentFolder($path);
+
         $handle = @fopen($localFile, 'rb');
 
         if ($handle === false) {
@@ -123,6 +130,7 @@ class DropboxClient
 
         $response = Http::withToken($this->accessToken())
             ->withHeaders($headers)
+            ->withBody('', 'application/octet-stream')
             ->withOptions(['sink' => $localFile, 'timeout' => $this->timeout])
             ->post($this->contentUrl.'/files/download');
 
@@ -134,16 +142,13 @@ class DropboxClient
      */
     public function copy(string $source, string $destination): void
     {
-        $response = Http::withToken($this->accessToken())
-            ->withHeaders([
-                'Dropbox-API-Arg' => $this->apiArg([
-                    'from_path' => $this->dropboxPath($source),
-                    'to_path' => $this->dropboxPath($destination),
-                    'autorename' => false,
-                ]),
-            ])
-            ->withOptions(['timeout' => $this->timeout])
-            ->post($this->apiUrl.'/files/copy_v2');
+        $this->ensureParentFolder($destination);
+
+        $response = $this->json('files/copy_v2', [
+            'from_path' => $this->dropboxPath($source),
+            'to_path' => $this->dropboxPath($destination),
+            'autorename' => false,
+        ]);
 
         $this->guard($response, 'copy');
     }
@@ -158,6 +163,7 @@ class DropboxClient
                 'Dropbox-API-Arg' => $this->apiArg(['path' => $this->dropboxPath($path)]),
                 'Range' => 'bytes=0-'.max(0, $bytes - 1),
             ])
+            ->withBody('', 'application/octet-stream')
             ->withOptions(['timeout' => $this->timeout])
             ->post($this->contentUrl.'/files/download');
 
@@ -173,20 +179,23 @@ class DropboxClient
      */
     public function metadata(string $path): ?array
     {
-        $response = Http::withToken($this->accessToken())
-            ->withHeaders([
-                'Dropbox-API-Arg' => $this->apiArg([
-                    'path' => $this->dropboxPath($path),
-                    'include_deleted' => false,
-                ]),
-            ])
-            ->withOptions(['timeout' => $this->timeout])
-            ->post($this->apiUrl.'/files/get_metadata');
+        return $this->metadataAbsolute($this->dropboxPath($path));
+    }
 
-        if ($response->status() === 409) {
-            // Dropbox answers 409 for "path/not_found" as well as for real
-            // conflicts, so the body decides whether this is a missing file.
-            return $this->isNotFound($response) ? null : $this->guard($response, 'get_metadata');
+    /**
+     * Metadata for an absolute Dropbox path.
+     *
+     * @return array<string, mixed>|null
+     */
+    protected function metadataAbsolute(string $path): ?array
+    {
+        $response = $this->json('files/get_metadata', [
+            'path' => $path,
+            'include_deleted' => false,
+        ]);
+
+        if ($response->status() === 409 && $this->isNotFound($response)) {
+            return null;
         }
 
         $this->guard($response, 'get_metadata');
@@ -198,12 +207,9 @@ class DropboxClient
 
     public function delete(string $path): void
     {
-        $response = Http::withToken($this->accessToken())
-            ->withHeaders([
-                'Dropbox-API-Arg' => $this->apiArg(['path' => $this->dropboxPath($path)]),
-            ])
-            ->withOptions(['timeout' => $this->timeout])
-            ->post($this->apiUrl.'/files/delete_v2');
+        $response = $this->json('files/delete_v2', [
+            'path' => $this->dropboxPath($path),
+        ]);
 
         if ($response->status() === 409 && $this->isNotFound($response)) {
             return;
@@ -219,16 +225,11 @@ class DropboxClient
      */
     public function listChildren(string $path): array
     {
-        $response = Http::withToken($this->accessToken())
-            ->withHeaders([
-                'Dropbox-API-Arg' => $this->apiArg([
-                    'path' => $this->dropboxPath($path),
-                    'recursive' => false,
-                    'include_deleted' => false,
-                ]),
-            ])
-            ->withOptions(['timeout' => $this->timeout])
-            ->post($this->apiUrl.'/files/list_folder');
+        $response = $this->json('files/list_folder', [
+            'path' => $this->dropboxPath($path),
+            'recursive' => false,
+            'include_deleted' => false,
+        ]);
 
         if ($response->status() === 409 && $this->isNotFound($response)) {
             return [];
@@ -250,10 +251,16 @@ class DropboxClient
     public function healthCheck(): bool
     {
         try {
-            $this->listChildren($this->root === '' ? '/' : $this->root);
+            $this->ensureRootFolder();
+            $this->listChildren('');
 
             return true;
         } catch (Throwable $e) {
+            Log::warning('Dropbox health check failed', [
+                'root' => $this->root,
+                'error' => $e->getMessage(),
+            ]);
+
             return false;
         }
     }
@@ -261,6 +268,11 @@ class DropboxClient
     public function startUploadSession(): string
     {
         $response = Http::withToken($this->accessToken())
+            ->withHeaders([
+                'Dropbox-API-Arg' => '{}',
+                'Content-Type' => 'application/octet-stream',
+            ])
+            ->withBody('', 'application/octet-stream')
             ->withOptions(['timeout' => $this->timeout])
             ->post($this->contentUrl.'/files/upload_session/start');
 
@@ -306,6 +318,8 @@ class DropboxClient
      */
     public function finishUploadSession(string $sessionId, int $offset, string $path, string $localFile): void
     {
+        $this->ensureParentFolder($path);
+
         $handle = @fopen($localFile, 'rb');
 
         if ($handle === false) {
@@ -339,9 +353,7 @@ class DropboxClient
     public function spaceUsage(): ?array
     {
         try {
-            $response = Http::withToken($this->accessToken())
-                ->withOptions(['timeout' => $this->timeout])
-                ->post($this->apiUrl.'/users/get_space_usage');
+            $response = $this->json('users/get_space_usage');
 
             if (! $response->successful()) {
                 return null;
@@ -522,5 +534,113 @@ class DropboxClient
         }
 
         return $encoded;
+    }
+
+    /**
+     * Ensure the configured root folder exists.
+     */
+    public function ensureRootFolder(): void
+    {
+        $this->ensureAbsoluteFolder('/'.trim($this->root, '/'));
+    }
+
+    /**
+     * Ensure the parent of an EDMS storage path exists.
+     */
+    public function ensureParentFolder(string $path): void
+    {
+        $path = trim($path, '/');
+
+        if (! str_contains($path, '/')) {
+            $this->ensureRootFolder();
+
+            return;
+        }
+
+        $parent = substr($path, 0, strrpos($path, '/'));
+
+        $this->ensureAbsoluteFolder($this->dropboxPath($parent));
+    }
+
+    /**
+     * Create every missing segment of an absolute Dropbox folder path.
+     */
+    protected function ensureAbsoluteFolder(string $absolute): void
+    {
+        $absolute = '/'.trim($absolute, '/');
+
+        if ($absolute === '' || $absolute === '/') {
+            return;
+        }
+
+        if (isset($this->ensuredFolders[$absolute])) {
+            return;
+        }
+
+        $current = '';
+
+        foreach (explode('/', trim($absolute, '/')) as $segment) {
+            $current .= '/'.$segment;
+
+            if (isset($this->ensuredFolders[$current])) {
+                continue;
+            }
+
+            if ($this->metadataAbsolute($current) === null) {
+                $this->createFolderAbsolute($current);
+            }
+
+            $this->ensuredFolders[$current] = true;
+        }
+    }
+
+    protected function createFolderAbsolute(string $path): void
+    {
+        $response = $this->json('files/create_folder_v2', [
+            'path' => $path,
+            'autorename' => false,
+        ]);
+
+        if ($response->status() === 409 && $this->isFolderConflict($response)) {
+            return;
+        }
+
+        $this->guard($response, 'create_folder_v2');
+    }
+
+    /**
+     * Send an RPC request with its argument as a JSON object.
+     *
+     * Laravel's post() sends an empty PHP array as "[]", which Dropbox rejects
+     * with "expected object, got array". A JSON body is also the documented
+     * format for the RPC endpoints; the content endpoints keep using the
+     * Dropbox-API-Arg header and a binary body.
+     */
+    protected function json(string $endpoint, array $argument = []): Response
+    {
+        $body = json_encode((object) $argument, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        if (! is_string($body)) {
+            throw new RuntimeException('Unable to encode the Dropbox API request.');
+        }
+
+        return Http::withToken($this->accessToken())
+            ->withHeaders(['Content-Type' => 'application/json'])
+            ->withBody($body, 'application/json')
+            ->withOptions(['timeout' => $this->timeout])
+            ->post($this->apiUrl.'/'.$endpoint);
+    }
+
+    protected function isFolderConflict(Response $response): bool
+    {
+        $decoded = $response->json();
+
+        if (! is_array($decoded)) {
+            return false;
+        }
+
+        $summary = $decoded['error_summary'] ?? '';
+
+        return is_string($summary) && str_contains($summary, 'conflict/folder');
     }
 }
