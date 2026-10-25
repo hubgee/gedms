@@ -30,6 +30,8 @@ class UploadController extends Controller
     /** Start a new upload session, or resume the matching one. */
     public function store(Request $request): JsonResponse
     {
+        set_time_limit(0);
+
         $validated = $request->validate([
             'space_id' => ['required', 'integer', 'exists:storage_spaces,id'],
             'folder_id' => ['nullable', 'integer', 'exists:folders,id'],
@@ -75,9 +77,14 @@ class UploadController extends Controller
     /** Store one chunk. Re-sending an index is safe. */
     public function chunk(Request $request, string $uuid, int $index): JsonResponse
     {
+        set_time_limit(0);
+
         $validated = $request->validate([
             'chunk' => ['required', 'file'],
             'sha256' => ['nullable', 'string', 'size:64', 'regex:/^[a-f0-9]{64}$/i'],
+        ], [
+            'chunk.required' => 'No chunk was received.',
+            'chunk.file' => 'The chunk did not arrive intact (check upload_max_filesize and post_max_size in php.ini).',
         ]);
 
         $session = $this->uploadService->findForUser($uuid, $request->user());
@@ -106,6 +113,8 @@ class UploadController extends Controller
     /** Finalise the upload and queue the assembly job. */
     public function complete(Request $request, string $uuid): JsonResponse
     {
+        set_time_limit(0);
+
         $session = $this->uploadService->findForUser($uuid, $request->user());
         $session = $this->uploadService->complete($session, $request->user());
 

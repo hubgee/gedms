@@ -577,6 +577,14 @@ class DropboxClient
             return;
         }
 
+        $cacheKey = $this->folderCacheKey($absolute);
+
+        if (Cache::get($cacheKey) === true) {
+            $this->ensuredFolders[$absolute] = true;
+
+            return;
+        }
+
         $current = '';
 
         foreach (explode('/', trim($absolute, '/')) as $segment) {
@@ -586,12 +594,29 @@ class DropboxClient
                 continue;
             }
 
+            $segmentCacheKey = $this->folderCacheKey($current);
+
+            if (Cache::get($segmentCacheKey) === true) {
+                $this->ensuredFolders[$current] = true;
+
+                continue;
+            }
+
             if ($this->metadataAbsolute($current) === null) {
                 $this->createFolderAbsolute($current);
             }
 
+            Cache::put($segmentCacheKey, true, now()->addDays(30));
             $this->ensuredFolders[$current] = true;
         }
+
+        Cache::put($cacheKey, true, now()->addDays(30));
+        $this->ensuredFolders[$absolute] = true;
+    }
+
+    protected function folderCacheKey(string $path): string
+    {
+        return 'edms.dropbox.folder.'.sha1($this->appKey.'|'.$this->refreshToken.'|'.$path);
     }
 
     protected function createFolderAbsolute(string $path): void
