@@ -3,7 +3,7 @@
 @section('content')
 <div class="space-y-4">
     <h1 class="text-2xl font-semibold text-slate-800">External storage</h1>
-    <p class="text-slate-500">Configure where each space stores its files. A space with no configuration uses the global driver from <code>config/uploads.php</code>.</p>
+    <p class="text-slate-500">Configure where each space stores its files. A space with no configuration uses the global driver.</p>
 
     @if(session('success'))
         <div class="rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 text-sm">{{ session('success') }}</div>
