@@ -56,17 +56,27 @@ class ExternalStorageController extends Controller
         $this->authorizeSpace($space);
 
         $selected = $space->storage_driver ?: (string) config('uploads.storage_driver', 'local');
+        $selectedKey = $this->registry->has($selected) ? $selected : 'local';
+        $config = $space->storageConfig() ?? [];
+
+        $redirectUris = [];
+
+        foreach ($this->registry->all() as $key => $driver) {
+            if ($driver->oauthProvider() === null) {
+                continue;
+            }
+
+            $driverConfig = $selectedKey === $key ? $config : [];
+            $redirectUris[$key] = $this->redirectUri($key, $driverConfig);
+        }
 
         return view('admin.external-storage.edit', [
             'space' => $space,
             'drivers' => $this->registry->all(),
-            'selectedDriver' => $this->registry->has($selected) ? $selected : 'local',
+            'selectedDriver' => $selectedKey,
             'inherited' => blank($space->storage_driver),
-            'config' => $space->storageConfig() ?? [],
-            'redirectUris' => collect($this->registry->all())
-                ->filter(fn (CloudStorageDriver $driver) => $driver->oauthProvider() !== null)
-                ->mapWithKeys(fn (CloudStorageDriver $driver) => [$driver->key() => $this->redirectUri($driver->key())])
-                ->all(),
+            'config' => $config,
+            'redirectUris' => $redirectUris,
             'usage' => $usage->forSpace($space, $request->boolean('usage')),
         ]);
     }
@@ -156,8 +166,8 @@ class ExternalStorageController extends Controller
         }
 
         $state = Str::random(48);
-        $redirectUri = $this->redirectUri($driver);
         $config = $this->mergeConfig($descriptor, $request, $this->existingConfig($space, $descriptor));
+        $redirectUri = $this->redirectUri($driver, $config);
         $codeVerifier = $oauth->usesPkce() ? Pkce::verifier() : null;
 
         try {
@@ -387,8 +397,14 @@ class ExternalStorageController extends Controller
      * in config/uploads.php wins, because a host behind a proxy may not be
      * able to derive its public URL from the request.
      */
-    protected function redirectUri(string $driver): string
+    protected function redirectUri(string $driver, array $config = []): string
     {
+        $configured = trim((string) ($config['redirect_uri'] ?? ''));
+
+        if ($configured !== '') {
+            return $configured;
+        }
+
         $configured = trim((string) config('uploads.'.$driver.'.redirect_uri', ''));
 
         if ($configured !== '') {

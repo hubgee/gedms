@@ -69,6 +69,13 @@ class GoogleDriveDriver extends AbstractStorageDriver
                 'advanced' => true,
                 'help' => 'Only needed when the interactive connection cannot be used.',
             ],
+            [
+                'key' => 'redirect_uri',
+                'label' => 'OAuth redirect URI',
+                'type' => 'url',
+                'placeholder' => route('admin.storage-spaces.external-storage.oauth.callback', ['driver' => 'google']),
+                'help' => 'The exact URL registered on the Google OAuth client. Leave blank to use the URL shown above.',
+            ],
         ];
     }
 

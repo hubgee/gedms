@@ -132,7 +132,7 @@
                     <div class="rounded-lg bg-slate-50 border border-slate-200 p-3 text-xs text-slate-600 space-y-2">
                         <p class="font-medium text-slate-700">Register this redirect URI on the {{ $descriptor->label() }} application</p>
                         <code class="block break-all rounded bg-white border border-slate-200 px-2 py-1">{{ $redirectUris[$key] }}</code>
-                        <p>Add the URL above in the provider's app console before connecting. Register the exact scheme, host, port and path; production should use HTTPS.</p>
+                        <p>Add the URL above in the provider's app console before connecting. Register the exact scheme, host, port and path; production should use HTTPS. If the app must send a different URL, edit <strong>OAuth redirect URI</strong> below.</p>
                     </div>
                 @endif
 

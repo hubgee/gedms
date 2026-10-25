@@ -68,6 +68,13 @@ class DropboxDriver extends AbstractStorageDriver
                 'advanced' => true,
                 'help' => 'Only needed when the interactive connection cannot be used.',
             ],
+            [
+                'key' => 'redirect_uri',
+                'label' => 'OAuth redirect URI',
+                'type' => 'url',
+                'placeholder' => route('admin.storage-spaces.external-storage.oauth.callback', ['driver' => 'dropbox']),
+                'help' => 'The exact URL registered on the Dropbox app. Leave blank to use the URL shown above.',
+            ],
         ];
     }
 

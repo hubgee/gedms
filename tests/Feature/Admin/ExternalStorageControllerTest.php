@@ -329,6 +329,44 @@ class ExternalStorageControllerTest extends TestCase
         $this->assertNotEmpty($query['state']);
     }
 
+    public function test_a_space_can_override_the_oauth_redirect_uri(): void
+    {
+        config([
+            'uploads.dropbox.app_key' => 'app-key',
+            'uploads.dropbox.app_secret' => 'app-secret',
+            'uploads.dropbox.redirect_uri' => '',
+        ]);
+
+        $space = $this->space();
+
+        $response = $this->actingAs($this->admin())
+            ->post(route('admin.storage-spaces.external-storage.oauth.connect', [
+                'space' => $space,
+                'driver' => 'dropbox',
+            ]), [
+                'storage_driver' => 'dropbox',
+                'settings' => [
+                    'dropbox' => [
+                        'app_key' => 'app-key',
+                        'app_secret' => 'app-secret',
+                        'root' => '/edms',
+                        'timeout' => '120',
+                        'redirect_uri' => 'https://edms.example/callback',
+                    ],
+                ],
+            ]);
+
+        $response->assertRedirect();
+
+        $location = (string) $response->headers->get('Location');
+        parse_str((string) parse_url($location, PHP_URL_QUERY), $query);
+
+        $this->assertSame('https://edms.example/callback', $query['redirect_uri']);
+
+        $payload = session('storage_oauth.'.$query['state']);
+        $this->assertSame('https://edms.example/callback', $payload['redirect_uri']);
+    }
+
     public function test_an_oauth_callback_stores_the_refresh_token_on_the_space(): void
     {
         Http::fake([

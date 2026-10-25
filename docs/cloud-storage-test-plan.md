@@ -296,8 +296,10 @@ Setup (admin UI, recommended):
 3. In the Dropbox app console, add the exact callback URL shown on the space's
    edit page:
    `.../admin/storage-spaces/external-storage/oauth/dropbox/callback`.
-   The flow uses PKCE, so Dropbox accepts `http://` for a non-localhost host;
-   production should still use HTTPS.
+   If the app must send a different URL, enter it in the **OAuth redirect URI**
+   field on the edit page; the app uses that value for both the authorisation
+   request and the token exchange. Dropbox requires HTTPS except for
+   `localhost`, so an `http://` non-localhost URL cannot be registered.
 4. In **Administration → Storage Spaces**, open the space, choose **Dropbox**,
    enter the app key and secret, and click **Connect with Dropbox**. The
    callback exchanges the code and stores the refresh token encrypted on the

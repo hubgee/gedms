@@ -60,7 +60,10 @@ configuration and returns the space to the global driver.
 The edit page shows the exact callback URL to register with the provider. The
 URL is derived from the named route, so it stays correct under a path prefix.
 If a reverse proxy changes the public host or scheme, set the matching
-`*_REDIRECT_URI` variable and register that exact URL instead.
+`*_REDIRECT_URI` variable and register that exact URL instead. You can also
+override it per space with the **OAuth redirect URI** field on the edit page;
+that value is stored encrypted with the space's configuration and is used for
+both the authorisation request and the token exchange.
 
 ### OAuth redirect URIs
 
