@@ -58,7 +58,8 @@ class DropboxDriver extends AbstractStorageDriver
                 'key' => 'timeout',
                 'label' => 'Timeout (seconds)',
                 'type' => 'number',
-                'default' => 120,
+                'default' => (int) config('uploads.dropbox.timeout', 300),
+                'help' => 'Seconds before a Dropbox request is abandoned. Keep it below the web server timeout.',
             ],
             [
                 'key' => 'refresh_token',
@@ -135,7 +136,7 @@ class DropboxDriver extends AbstractStorageDriver
             $secret,
             $refresh,
             (string) $this->value($config, 'root', config('uploads.dropbox.root', '/edms')),
-            (int) $this->value($config, 'timeout', config('uploads.dropbox.timeout', 120)),
+            (int) $this->value($config, 'timeout', config('uploads.dropbox.timeout', 300)),
             (string) $this->value($config, 'api_url', config('uploads.dropbox.api_url', 'https://api.dropboxapi.com/2')),
             (string) $this->value($config, 'content_url', config('uploads.dropbox.content_url', 'https://content.dropboxapi.com/2')),
         );

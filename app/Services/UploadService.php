@@ -9,6 +9,7 @@ use App\Models\StorageSpace;
 use App\Models\UploadChunk;
 use App\Models\UploadSession;
 use App\Models\User;
+use App\Services\Uploads\StorageUnavailableException;
 use App\Services\Uploads\UploadIncompleteException;
 use App\Services\Uploads\UploadStorageFactory;
 use App\Services\Uploads\UploadVerificationException;
@@ -214,6 +215,11 @@ class UploadService
 
         try {
             $this->storageFor($session)->putChunk($this->chunkPath($session, $index), $chunk->getRealPath(), $sha256);
+        } catch (StorageUnavailableException $e) {
+            // The provider is rate-limiting or unreachable. This is transient:
+            // let the HTTP layer answer 503 so the browser retries the chunk
+            // instead of treating it as a permanent 422.
+            throw $e;
         } catch (RuntimeException $e) {
             throw ValidationException::withMessages(['chunk' => $e->getMessage()]);
         }
@@ -558,10 +564,17 @@ class UploadService
     {
         $receivedBytes = 0;
         $dirty = false;
+        $storage = $this->storageFor($session);
 
         foreach ($session->chunks()->get() as $chunk) {
             $path = $this->chunkPath($session, (int) $chunk->chunk_index);
-            $onDisk = $this->storageFor($session)->exists($path) ? (int) $this->storageFor($session)->size($path) : 0;
+
+            // size() already answers "missing" with null, so asking exists()
+            // first would double the number of metadata calls: 126 round trips
+            // for a 63-chunk upload, which is exactly the sort of burst that
+            // triggers a provider rate limit.
+            $size = $storage->size($path);
+            $onDisk = $size === null ? 0 : (int) $size;
 
             if ($onDisk !== (int) $chunk->bytes) {
                 $chunk->delete();

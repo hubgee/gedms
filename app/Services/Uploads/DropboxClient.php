@@ -2,6 +2,9 @@
 
 namespace App\Services\Uploads;
 
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -31,6 +34,17 @@ class DropboxClient
 
     protected const TOKEN_CACHE_KEY = 'edms.dropbox.access_token';
 
+    /** How often a rate-limited RPC call is attempted before it is reported. */
+    protected const RATE_LIMIT_ATTEMPTS = 4;
+
+    /** How long a folder lock is held, and how long a request waits for it. */
+    protected const FOLDER_LOCK_SECONDS = 120;
+
+    protected const FOLDER_LOCK_WAIT_SECONDS = 60;
+
+    /** Folder existence is cached for this long. */
+    protected const FOLDER_CACHE_DAYS = 30;
+
     /** @var array<string, true> Folders already created or verified in this request. */
     protected array $ensuredFolders = [];
 
@@ -39,7 +53,7 @@ class DropboxClient
         protected string $appSecret,
         protected string $refreshToken,
         protected string $root = '/edms',
-        protected int $timeout = 120,
+        protected int $timeout = 300,
         protected string $apiUrl = 'https://api.dropboxapi.com/2',
         protected string $contentUrl = 'https://content.dropboxapi.com/2',
     ) {}
@@ -128,11 +142,11 @@ class DropboxClient
             $headers['Range'] = 'bytes='.$offset.'-'.($end ?? '');
         }
 
-        $response = Http::withToken($this->accessToken())
+        $response = $this->send('download', fn () => Http::withToken($this->accessToken())
             ->withHeaders($headers)
             ->withBody('', 'application/octet-stream')
-            ->withOptions(['sink' => $localFile, 'timeout' => $this->timeout])
-            ->post($this->contentUrl.'/files/download');
+            ->withOptions($this->options(['sink' => $localFile]))
+            ->post($this->contentUrl.'/files/download'));
 
         $this->guard($response, 'download');
     }
@@ -158,14 +172,14 @@ class DropboxClient
      */
     public function readHead(string $path, int $bytes): ?string
     {
-        $response = Http::withToken($this->accessToken())
+        $response = $this->send('download', fn () => Http::withToken($this->accessToken())
             ->withHeaders([
                 'Dropbox-API-Arg' => $this->apiArg(['path' => $this->dropboxPath($path)]),
                 'Range' => 'bytes=0-'.max(0, $bytes - 1),
             ])
             ->withBody('', 'application/octet-stream')
-            ->withOptions(['timeout' => $this->timeout])
-            ->post($this->contentUrl.'/files/download');
+            ->withOptions($this->options())
+            ->post($this->contentUrl.'/files/download'));
 
         if (! $response->successful()) {
             return null;
@@ -219,6 +233,26 @@ class DropboxClient
     }
 
     /**
+     * Forget the cached existence of a folder and its ancestors.
+     *
+     * Called after a directory is deleted: the folder cache lives for 30 days,
+     * so without this a later upload would be told the deleted folder still
+     * exists and fail with path/not_found.
+     */
+    public function forgetFolder(string $path): void
+    {
+        $absolute = '/'.trim($this->dropboxPath($path), '/');
+
+        while ($absolute !== '' && $absolute !== '/') {
+            Cache::forget($this->folderCacheKey($absolute));
+            unset($this->ensuredFolders[$absolute]);
+
+            $slash = strrpos($absolute, '/');
+            $absolute = $slash === false || $slash === 0 ? '' : substr($absolute, 0, $slash);
+        }
+    }
+
+    /**
      * Immediate children of a folder.
      *
      * @return array<int, array<string, mixed>>
@@ -267,14 +301,14 @@ class DropboxClient
 
     public function startUploadSession(): string
     {
-        $response = Http::withToken($this->accessToken())
+        $response = $this->send('upload_session/start', fn () => Http::withToken($this->accessToken())
             ->withHeaders([
                 'Dropbox-API-Arg' => '{}',
                 'Content-Type' => 'application/octet-stream',
             ])
             ->withBody('', 'application/octet-stream')
-            ->withOptions(['timeout' => $this->timeout])
-            ->post($this->contentUrl.'/files/upload_session/start');
+            ->withOptions($this->options())
+            ->post($this->contentUrl.'/files/upload_session/start'));
 
         $this->guard($response, 'upload_session/start');
 
@@ -304,8 +338,13 @@ class DropboxClient
 
         try {
             $this->content('files/upload_session/append_v2', [
-                'session_id' => $sessionId,
-                'offset' => $offset,
+                // Dropbox nests the session id and offset under "cursor". Sending
+                // them at the top level fails with "cursor: Couldn't find
+                // required field".
+                'cursor' => [
+                    'session_id' => $sessionId,
+                    'offset' => $offset,
+                ],
                 'close' => false,
             ], $handle);
         } finally {
@@ -328,13 +367,17 @@ class DropboxClient
 
         try {
             $this->content('files/upload_session/finish', [
-                'session_id' => $sessionId,
-                'offset' => $offset,
-                'path' => $this->dropboxPath($path),
-                'mode' => 'overwrite',
-                'autorename' => false,
-                'mute' => true,
-                'strict_conflict' => false,
+                'cursor' => [
+                    'session_id' => $sessionId,
+                    'offset' => $offset,
+                ],
+                'commit' => [
+                    'path' => $this->dropboxPath($path),
+                    'mode' => 'overwrite',
+                    'autorename' => false,
+                    'mute' => true,
+                    'strict_conflict' => false,
+                ],
             ], $handle);
         } finally {
             fclose($handle);
@@ -418,14 +461,14 @@ class DropboxClient
             return $cached;
         }
 
-        $response = Http::asForm()
-            ->withOptions(['timeout' => $this->timeout])
+        $response = $this->send('oauth2/token', fn () => Http::asForm()
+            ->withOptions($this->options())
             ->post(self::TOKEN_URL, [
                 'grant_type' => 'refresh_token',
                 'refresh_token' => $this->refreshToken,
                 'client_id' => $this->appKey,
                 'client_secret' => $this->appSecret,
-            ]);
+            ]));
 
         if (! $response->successful()) {
             throw new RuntimeException(
@@ -465,16 +508,56 @@ class DropboxClient
      */
     protected function content(string $endpoint, array $argument, $body): void
     {
-        $response = Http::withToken($this->accessToken())
+        $response = $this->send($endpoint, fn () => Http::withToken($this->accessToken())
             ->withHeaders([
                 'Dropbox-API-Arg' => $this->apiArg($argument),
                 'Content-Type' => 'application/octet-stream',
             ])
             ->withBody($body, 'application/octet-stream')
-            ->withOptions(['timeout' => $this->timeout])
-            ->post($this->contentUrl.'/'.$endpoint);
+            ->withOptions($this->options())
+            ->post($this->contentUrl.'/'.$endpoint));
 
         $this->guard($response, $endpoint);
+    }
+
+    /**
+     * Per-request HTTP options.
+     *
+     * A separate, short connect timeout means a dead DNS entry or a blocked
+     * route fails in seconds instead of burning the whole upload timeout.
+     *
+     * @param  array<string, mixed>  $extra
+     * @return array<string, mixed>
+     */
+    protected function options(array $extra = []): array
+    {
+        return array_merge([
+            'timeout' => $this->timeout,
+            'connect_timeout' => max(5, min(15, $this->timeout)),
+        ], $extra);
+    }
+
+    /**
+     * Run a Dropbox call and turn a transport failure into a retryable error.
+     *
+     * @param  callable(): Response  $send
+     */
+    protected function send(string $operation, callable $send): Response
+    {
+        try {
+            return $send();
+        } catch (ConnectionException $e) {
+            Log::warning('Dropbox request failed', [
+                'operation' => $operation,
+                'error' => $e->getMessage(),
+            ]);
+
+            throw new StorageUnavailableException(
+                'Dropbox is temporarily unreachable. Please retry the upload.',
+                0,
+                $e,
+            );
+        }
     }
 
     protected function guard(Response $response, string $operation): void
@@ -483,9 +566,120 @@ class DropboxClient
             return;
         }
 
-        throw new RuntimeException(
-            'Dropbox '.$operation.' failed: '.$this->errorMessage($response)
-        );
+        $message = 'Dropbox '.$operation.' failed: '.$this->errorMessage($response);
+
+        // A rate limit or a provider-side 5xx is transient: the chunk is
+        // retryable, so this must not surface as a 422 validation error.
+        if ($this->isTransientFailure($response)) {
+            throw new StorageUnavailableException($message.' Please retry.');
+        }
+
+        throw new RuntimeException($message);
+    }
+
+    protected function isTransientFailure(Response $response): bool
+    {
+        return $this->isRateLimited($response) || $response->serverError();
+    }
+
+    /**
+     * Whether Dropbox asked us to slow down.
+     */
+    protected function isRateLimited(Response $response): bool
+    {
+        if ($response->status() === 429) {
+            return true;
+        }
+
+        if ($this->errorTag($response) === 'too_many_write_operations') {
+            return true;
+        }
+
+        $decoded = $response->json();
+        $summary = is_array($decoded) ? ($decoded['error_summary'] ?? '') : '';
+
+        return is_string($summary) && str_contains($summary, 'too_many_write_operations');
+    }
+
+    /**
+     * The deepest Dropbox error tag in the response.
+     *
+     * error_summary is empty for some failures (notably
+     * too_many_write_operations), so the tagged union under error.reason is the
+     * only useful detail. Reading it also gives the admin a message that says
+     * what happened instead of dumping raw JSON into the upload banner.
+     */
+    protected function errorTag(Response $response): ?string
+    {
+        $decoded = $response->json();
+
+        if (! is_array($decoded)) {
+            return null;
+        }
+
+        $reason = $decoded['error']['reason'] ?? null;
+
+        if (is_array($reason)) {
+            $tag = $reason['.tag'] ?? null;
+
+            if (is_string($tag) && $tag !== '') {
+                return $tag;
+            }
+
+            foreach ($reason as $nested) {
+                if (is_array($nested) && is_string($nested['.tag'] ?? null)) {
+                    return $nested['.tag'];
+                }
+            }
+        }
+
+        // Some endpoints put the tag under error.path instead of error.reason.
+        $path = $decoded['error']['path'] ?? null;
+
+        if (is_array($path) && is_string($path['.tag'] ?? null)) {
+            return $path['.tag'];
+        }
+
+        return null;
+    }
+
+    /**
+     * The number of seconds Dropbox asked us to wait, when it said so.
+     */
+    protected function retryAfter(Response $response): ?int
+    {
+        $decoded = $response->json();
+
+        if (is_array($decoded)) {
+            $retry = $decoded['error']['retry_after'] ?? null;
+
+            if (is_numeric($retry)) {
+                return max(0, (int) $retry);
+            }
+        }
+
+        $header = $response->header('Retry-After');
+
+        return is_numeric($header) ? max(0, (int) $header) : null;
+    }
+
+    /**
+     * Sleep before retrying a rate-limited call.
+     *
+     * Dropbox's retry_after is often 0, which is not an invitation to hammer
+     * the endpoint: the exponential floor plus jitter spreads the three
+     * parallel chunk requests out instead of having them collide again.
+     */
+    protected function waitForRateLimit(Response $response, int $attempt): void
+    {
+        $retryAfter = $this->retryAfter($response);
+        $seconds = $retryAfter !== null && $retryAfter > 0
+            ? $retryAfter
+            : 0.25 * (2 ** ($attempt - 1));
+
+        $milliseconds = (int) min(15000, max(250, $seconds * 1000 + random_int(0, 500)));
+
+        usleep($milliseconds * 1000);
     }
 
     protected function errorMessage(Response $response): string
@@ -501,6 +695,15 @@ class DropboxClient
                 if (is_string($summary) && $summary !== '') {
                     return $summary;
                 }
+
+                $tag = $this->errorTag($response);
+
+                if ($tag !== null) {
+                    $retry = $this->retryAfter($response);
+                    $suffix = $retry !== null && $retry > 0 ? " (retry after {$retry}s)" : '';
+
+                    return $tag.$suffix;
+                }
             }
 
             return substr($body, 0, 250);
@@ -511,6 +714,10 @@ class DropboxClient
 
     protected function isNotFound(Response $response): bool
     {
+        if ($this->errorTag($response) === 'not_found') {
+            return true;
+        }
+
         $decoded = $response->json();
 
         if (! is_array($decoded)) {
@@ -564,6 +771,12 @@ class DropboxClient
 
     /**
      * Create every missing segment of an absolute Dropbox folder path.
+     *
+     * The work is done under a cache lock. Three chunks of the same new upload
+     * arrive at once; without the lock all three see the folder as missing and
+     * call create_folder_v2 together, which Dropbox answers with
+     * too_many_write_operations. The lock makes the first request create the
+     * folder and the other two reuse its cached result.
      */
     protected function ensureAbsoluteFolder(string $absolute): void
     {
@@ -573,30 +786,65 @@ class DropboxClient
             return;
         }
 
-        if (isset($this->ensuredFolders[$absolute])) {
-            return;
-        }
-
-        $cacheKey = $this->folderCacheKey($absolute);
-
-        if (Cache::get($cacheKey) === true) {
+        if (isset($this->ensuredFolders[$absolute]) || $this->folderIsCached($absolute)) {
             $this->ensuredFolders[$absolute] = true;
 
             return;
         }
 
+        $lock = $this->folderLock($absolute);
+
+        if ($lock === null) {
+            $this->createMissingFolders($absolute);
+
+            return;
+        }
+
+        try {
+            $lock->block(self::FOLDER_LOCK_WAIT_SECONDS);
+        } catch (LockTimeoutException) {
+            // The holder is taking too long. Falling through is safe:
+            // createFolderAbsolute() treats an existing folder as success.
+            Log::warning('Dropbox folder lock timed out', ['path' => $absolute]);
+
+            $this->createMissingFolders($absolute);
+
+            return;
+        } catch (Throwable $e) {
+            // The cache backend could not hand out a lock (a busy SQLite
+            // database, for example). A best-effort ensure is still better
+            // than failing the chunk; conflicts are tolerated.
+            Log::warning('Dropbox folder lock failed', [
+                'path' => $absolute,
+                'error' => $e->getMessage(),
+            ]);
+
+            $this->createMissingFolders($absolute);
+
+            return;
+        }
+
+        try {
+            // Double-checked: another request may have created the folder
+            // while this one was waiting for the lock.
+            if (! $this->folderIsCached($absolute)) {
+                $this->createMissingFolders($absolute);
+            }
+        } finally {
+            $lock->release();
+        }
+
+        $this->ensuredFolders[$absolute] = true;
+    }
+
+    protected function createMissingFolders(string $absolute): void
+    {
         $current = '';
 
         foreach (explode('/', trim($absolute, '/')) as $segment) {
             $current .= '/'.$segment;
 
-            if (isset($this->ensuredFolders[$current])) {
-                continue;
-            }
-
-            $segmentCacheKey = $this->folderCacheKey($current);
-
-            if (Cache::get($segmentCacheKey) === true) {
+            if (isset($this->ensuredFolders[$current]) || $this->folderIsCached($current)) {
                 $this->ensuredFolders[$current] = true;
 
                 continue;
@@ -606,17 +854,44 @@ class DropboxClient
                 $this->createFolderAbsolute($current);
             }
 
-            Cache::put($segmentCacheKey, true, now()->addDays(30));
-            $this->ensuredFolders[$current] = true;
+            $this->rememberFolder($current);
         }
+    }
 
-        Cache::put($cacheKey, true, now()->addDays(30));
-        $this->ensuredFolders[$absolute] = true;
+    protected function folderIsCached(string $path): bool
+    {
+        return Cache::get($this->folderCacheKey($path)) === true;
+    }
+
+    protected function rememberFolder(string $path): void
+    {
+        Cache::put(
+            $this->folderCacheKey($path),
+            true,
+            now()->addDays(self::FOLDER_CACHE_DAYS),
+        );
     }
 
     protected function folderCacheKey(string $path): string
     {
         return 'edms.dropbox.folder.'.sha1($this->appKey.'|'.$this->refreshToken.'|'.$path);
+    }
+
+    protected function folderLock(string $path): ?Lock
+    {
+        try {
+            return Cache::lock(
+                'edms.dropbox.folder-lock.'.sha1($this->appKey.'|'.$this->refreshToken.'|'.$path),
+                self::FOLDER_LOCK_SECONDS,
+            );
+        } catch (Throwable $e) {
+            Log::debug('Dropbox folder lock unavailable', [
+                'path' => $path,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
     }
 
     protected function createFolderAbsolute(string $path): void
@@ -626,7 +901,14 @@ class DropboxClient
             'autorename' => false,
         ]);
 
-        if ($response->status() === 409 && $this->isFolderConflict($response)) {
+        if ($response->successful() || $this->isFolderConflict($response)) {
+            return;
+        }
+
+        // A retry can race with the request that created the folder. If the
+        // folder is there now, the write succeeded from the caller's point of
+        // view even though Dropbox reported a rate limit.
+        if ($this->isRateLimited($response) && $this->metadataAbsolute($path) !== null) {
             return;
         }
 
@@ -640,6 +922,9 @@ class DropboxClient
      * with "expected object, got array". A JSON body is also the documented
      * format for the RPC endpoints; the content endpoints keep using the
      * Dropbox-API-Arg header and a binary body.
+     *
+     * Rate-limited calls are retried with backoff; every other failure is
+     * returned to the caller so it can decide whether a 409 is meaningful.
      */
     protected function json(string $endpoint, array $argument = []): Response
     {
@@ -649,11 +934,32 @@ class DropboxClient
             throw new RuntimeException('Unable to encode the Dropbox API request.');
         }
 
-        return Http::withToken($this->accessToken())
-            ->withHeaders(['Content-Type' => 'application/json'])
-            ->withBody($body, 'application/json')
-            ->withOptions(['timeout' => $this->timeout])
-            ->post($this->apiUrl.'/'.$endpoint);
+        $response = null;
+
+        for ($attempt = 1; $attempt <= self::RATE_LIMIT_ATTEMPTS; $attempt++) {
+            $response = $this->send($endpoint, fn () => Http::withToken($this->accessToken())
+                ->withHeaders(['Content-Type' => 'application/json'])
+                ->withBody($body, 'application/json')
+                ->withOptions($this->options())
+                ->post($this->apiUrl.'/'.$endpoint));
+
+            if (! $this->isRateLimited($response) || $attempt === self::RATE_LIMIT_ATTEMPTS) {
+                break;
+            }
+
+            Log::notice('Dropbox rate limit; retrying', [
+                'endpoint' => $endpoint,
+                'attempt' => $attempt,
+            ]);
+
+            $this->waitForRateLimit($response, $attempt);
+        }
+
+        if (! $response instanceof Response) {
+            throw new StorageUnavailableException('Dropbox did not return a response.');
+        }
+
+        return $response;
     }
 
     protected function isFolderConflict(Response $response): bool

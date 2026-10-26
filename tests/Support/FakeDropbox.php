@@ -35,6 +35,12 @@ class FakeDropbox
     /** @var array<int, array{endpoint: string, path: string, offset: int, bytes: int, range: string}> */
     protected array $calls = [];
 
+    /** @var array<int, array{endpoint: string, body: array<string, mixed>, status: int}> */
+    protected array $failures = [];
+
+    /** @var array<string, array{body: array<string, mixed>, status: int}> */
+    protected array $alwaysFailures = [];
+
     protected int $sessionCounter = 0;
 
     public function __construct(
@@ -133,6 +139,26 @@ class FakeDropbox
     }
 
     /**
+     * Make the next call to an endpoint fail, then behave normally again.
+     *
+     * @param  array<string, mixed>  $body
+     */
+    public function failNext(string $endpoint, array $body = [], int $status = 409): void
+    {
+        $this->failures[] = compact('endpoint', 'body', 'status');
+    }
+
+    /**
+     * Make every call to an endpoint fail.
+     *
+     * @param  array<string, mixed>  $body
+     */
+    public function failAlways(string $endpoint, array $body = [], int $status = 429): void
+    {
+        $this->alwaysFailures[$endpoint] = compact('body', 'status');
+    }
+
+    /**
      * Answer a request.
      *
      * The HTTP client's fake handler expects a promise (or an array), so the
@@ -152,6 +178,20 @@ class FakeDropbox
 
         $argument = $this->argument($request);
         $endpoint = $this->endpoint($url);
+
+        if (isset($this->alwaysFailures[$endpoint])) {
+            $failure = $this->alwaysFailures[$endpoint];
+
+            return $this->response($failure['body'], $failure['status']);
+        }
+
+        foreach ($this->failures as $index => $failure) {
+            if ($failure['endpoint'] === $endpoint) {
+                array_splice($this->failures, $index, 1);
+
+                return $this->response($failure['body'], $failure['status']);
+            }
+        }
 
         switch ($endpoint) {
             case 'files/upload':
@@ -176,8 +216,9 @@ class FakeDropbox
                 return $this->response(['session_id' => $id]);
 
             case 'files/upload_session/append_v2':
-                $id = $argument['session_id'] ?? '';
-                $offset = (int) ($argument['offset'] ?? 0);
+                $cursor = $argument['cursor'] ?? [];
+                $id = $cursor['session_id'] ?? '';
+                $offset = (int) ($cursor['offset'] ?? 0);
                 $body = (string) $request->body();
 
                 if (! isset($this->sessions[$id])) {
@@ -200,8 +241,9 @@ class FakeDropbox
                 return $this->response([]);
 
             case 'files/upload_session/finish':
-                $id = $argument['session_id'] ?? '';
-                $offset = (int) ($argument['offset'] ?? 0);
+                $cursor = $argument['cursor'] ?? [];
+                $id = $cursor['session_id'] ?? '';
+                $offset = (int) ($cursor['offset'] ?? 0);
 
                 if (! isset($this->sessions[$id])) {
                     return $this->conflict('path/not_found');
@@ -211,7 +253,8 @@ class FakeDropbox
                     return $this->response(['error_summary' => 'incorrect_offset/'], 409);
                 }
 
-                $path = $argument['path'] ?? '';
+                $commit = $argument['commit'] ?? [];
+                $path = $commit['path'] ?? '';
 
                 if (! $this->parentExists($path)) {
                     return $this->conflict('path/not_found');

@@ -62,7 +62,7 @@ class FaultInjectingUploadStorage implements UploadStorage
                 @unlink($truncated);
             }
 
-            throw new RuntimeException('The connection dropped while the chunk was being transferred.');
+            throw new StorageUnavailableException('The connection dropped while the chunk was being transferred.');
         }
 
         $this->inner->putChunk($path, $sourcePath, $expectedSha256);
@@ -178,7 +178,11 @@ class FaultInjectingUploadStorage implements UploadStorage
 
     public function localPath(string $path): ?string
     {
-        return $this->inner->localPath($path);
+        if (! method_exists($this->inner, 'localPath')) {
+            return null;
+        }
+
+        return call_user_func([$this->inner, 'localPath'], $path);
     }
 
     /**
@@ -207,7 +211,7 @@ class FaultInjectingUploadStorage implements UploadStorage
         }
 
         if ($profile->failureRate > 0.0 && (random_int(1, 1000000) / 1000000) < $profile->failureRate) {
-            throw new RuntimeException('The storage provider is temporarily unavailable.');
+            throw new StorageUnavailableException('The storage provider is temporarily unavailable.');
         }
     }
 

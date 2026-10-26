@@ -161,6 +161,7 @@ class DropboxUploadStorage implements ReportsStorageQuota, UploadStorage
         }
 
         $this->client->delete($directory);
+        $this->client->forgetFolder($directory);
     }
 
     /**

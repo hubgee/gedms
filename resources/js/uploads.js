@@ -20,14 +20,16 @@
 
 const DEFAULTS = {
     /** Chunks in flight per file. Keep in sync with config('uploads.concurrency'). */
-    concurrency: 3,
+    concurrency: 2,
     /** Attempts per chunk (1 try + retries). */
     maxAttempts: 5,
     baseDelayMs: 1000,
     maxDelayMs: 15000,
     /** Assembly polling (the job runs on a queue). */
     pollIntervalMs: 2000,
-    pollAttempts: 60,
+    // 10 minutes. Cloud assembly downloads and re-uploads every chunk, so a
+    // large file can legitimately take minutes even on a healthy link.
+    pollAttempts: 300,
 };
 
 /** Endpoints are emitted by Blade so the app can live in a subdirectory. */
@@ -338,7 +340,12 @@ class UploadJob {
      */
     async sendChunks() {
         const cfg = readConfig();
-        const chunkSize = cfg.chunkBytes || this.session.chunk_bytes;
+        // The session's chunk size is authoritative: the server computed
+        // total_chunks and validates every chunk against it. The page config is
+        // only a fallback for an older session that did not report one. Using
+        // the current config first would break a resume after an admin changes
+        // UPLOAD_CHUNK_BYTES, and every chunk would come back as a 422.
+        const chunkSize = this.session.chunk_bytes || cfg.chunkBytes;
         const total = this.session.total_chunks;
         const pending = [...(this.session.missing || Array.from({ length: total }, (_, i) => i))];
 

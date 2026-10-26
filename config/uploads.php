@@ -16,8 +16,8 @@ return [
     | file. Required server configuration:
     |
     |   PHP   : upload_max_filesize = 20M, post_max_size = 25M,
-    |           max_execution_time = 60
-    |   Nginx : client_max_body_size = 25m
+    |           max_execution_time = 0
+    |   Nginx : client_max_body_size = 25m, fastcgi_read_timeout = 600s
     |
     | The final assembly runs on the dedicated "uploads" queue connection
     | (config/queue.php) whose retry_after is deliberately long, so a worker is
@@ -31,11 +31,14 @@ return [
     'max_bytes' => (int) env('UPLOAD_MAX_BYTES', 10737418240),
 
     // Size of one chunk in bytes (default: 8 MB). Small enough that resending
-    // a lost chunk after an outage is cheap, large enough for throughput.
+    // a lost chunk after an outage is cheap, large enough for throughput. On a
+    // slow uplink, lower this (for example 4 MB) so a single chunk still fits
+    // inside the web server's fastcgi_read_timeout.
     'chunk_bytes' => (int) env('UPLOAD_CHUNK_BYTES', 8388608),
 
-    // Number of chunks the client may upload in parallel.
-    'concurrency' => (int) env('UPLOAD_CONCURRENCY', 3),
+    // Number of chunks the client may upload in parallel. Two keeps the pipe
+    // busy without tripping a provider's write rate limit.
+    'concurrency' => (int) env('UPLOAD_CONCURRENCY', 2),
 
     // Hours an inactive session stays resumable before it expires.
     'ttl_hours' => (int) env('UPLOAD_TTL_HOURS', 48),
@@ -196,8 +199,10 @@ return [
         // Leave empty to derive it from the named callback route.
         'redirect_uri' => env('DROPBOX_REDIRECT_URI', ''),
 
-        // Seconds before a Dropbox request is abandoned.
-        'timeout' => (int) env('DROPBOX_TIMEOUT', 120),
+        // Seconds before a Dropbox request is abandoned. Keep this below the
+        // web server's fastcgi_read_timeout so the app can report a retryable
+        // error instead of the proxy returning a bare 504.
+        'timeout' => (int) env('DROPBOX_TIMEOUT', 300),
 
         // Override only for testing/proxying; production uses the defaults.
         'api_url' => env('DROPBOX_API_URL', 'https://api.dropboxapi.com/2'),

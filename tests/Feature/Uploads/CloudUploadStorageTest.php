@@ -10,6 +10,7 @@ use App\Services\Uploads\CloudFaultProfile;
 use App\Services\Uploads\CloudFaults;
 use App\Services\Uploads\DropboxClient;
 use App\Services\Uploads\DropboxUploadStorage;
+use App\Services\Uploads\StorageUnavailableException;
 use App\Services\Uploads\UploadStorageFactory;
 use App\Services\Uploads\UploadVerificationException;
 use Illuminate\Support\Facades\Http;
@@ -92,7 +93,7 @@ class CloudUploadStorageTest extends UploadTestCase
     // Application-level fault injection
     // ---------------------------------------------------------------------
 
-    public function test_a_transient_provider_failure_is_a_retryable_validation_error(): void
+    public function test_a_transient_provider_failure_is_retryable(): void
     {
         $this->useFaultProfile(new CloudFaultProfile(failureRate: 1.0));
 
@@ -100,18 +101,34 @@ class CloudUploadStorageTest extends UploadTestCase
         $space = $this->makePersonalSpace($user);
         $session = $this->beginUpload($user, $space);
 
-        $exception = $this->assertValidationFails(
-            fn () => $this->uploadService()->putChunk($session, $user, 0, $this->makeChunk(8)),
-            'chunk',
-        );
-
-        $this->assertStringContainsString('temporarily unavailable', $exception->errors()['chunk'][0]);
+        try {
+            $this->uploadService()->putChunk($session, $user, 0, $this->makeChunk(8));
+            $this->fail('A transient provider failure must be reported.');
+        } catch (StorageUnavailableException $e) {
+            // A 503, not a 422: the browser retries this chunk.
+            $this->assertStringContainsString('temporarily unavailable', $e->getMessage());
+        }
 
         // The failure happened before the index was touched, so a retry starts
         // from a clean state instead of a half-recorded chunk.
         $this->assertSame(0, $session->fresh()->received_bytes);
         $this->assertSame([], $session->fresh()->receivedChunkIndexes());
         $this->assertDatabaseCount('upload_chunks', 0);
+    }
+
+    public function test_a_transient_storage_failure_returns_503_so_the_browser_retries(): void
+    {
+        $this->useFaultProfile(new CloudFaultProfile(failureRate: 1.0));
+
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->beginUpload($user, $space, null, 20);
+
+        $this->actingAs($user)->put(
+            route('uploads.chunks.store', ['uuid' => $session->uuid, 'index' => 0]),
+            ['chunk' => $this->makeChunk(8, 0)],
+            ['Accept' => 'application/json'],
+        )->assertStatus(503);
     }
 
     public function test_an_exhausted_quota_fails_the_operation_without_corrupting_the_session(): void
@@ -143,10 +160,12 @@ class CloudUploadStorageTest extends UploadTestCase
         $space = $this->makePersonalSpace($user);
         $session = $this->beginUpload($user, $space, null, 20);
 
-        $this->assertValidationFails(
-            fn () => $this->uploadService()->putChunk($session, $user, 0, $this->makeChunk(8)),
-            'chunk',
-        );
+        try {
+            $this->uploadService()->putChunk($session, $user, 0, $this->makeChunk(8));
+            $this->fail('A dropped connection must be reported.');
+        } catch (StorageUnavailableException $e) {
+            $this->assertStringContainsString('connection dropped', $e->getMessage());
+        }
 
         // The connection dropped after 4 bytes: a short object is on the store,
         // and the client was told to send the chunk again.
@@ -448,6 +467,127 @@ class CloudUploadStorageTest extends UploadTestCase
 
         $this->assertContains('/edms/tmp', $created);
         $this->assertContains('/edms/tmp/'.$session->uuid, $created);
+    }
+
+    public function test_the_dropbox_backend_creates_each_folder_only_once_per_session(): void
+    {
+        $fake = $this->useDropbox();
+
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->beginUpload($user, $space, null, 20);
+
+        // The three chunks arrive as three separate requests in production.
+        // Simulating them sequentially is enough to prove the folder result is
+        // cached: the second request must not create anything again.
+        $this->uploadService()->putChunk($session, $user, 0, $this->makeChunk(8));
+        $this->uploadService()->putChunk($session, $user, 1, $this->makeChunk(8));
+
+        $created = array_column($fake->callsTo('files/create_folder_v2'), 'path');
+        $counts = array_count_values($created);
+
+        $this->assertSame(1, $counts['/edms/tmp'] ?? 0);
+        $this->assertSame(1, $counts['/edms/tmp/'.$session->uuid] ?? 0);
+    }
+
+    public function test_a_rate_limited_folder_create_is_retried_instead_of_failing_the_chunk(): void
+    {
+        $fake = $this->useDropbox();
+
+        $fake->failNext('files/create_folder_v2', [
+            'error' => [
+                'reason' => ['.tag' => 'too_many_write_operations'],
+                'retry_after' => 0,
+            ],
+            'error_summary' => '',
+        ], 409);
+
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->beginUpload($user, $space, null, 20);
+
+        $this->uploadService()->putChunk($session, $user, 0, $this->makeChunk(8));
+
+        $this->assertTrue($fake->hasAt($this->chunkPathFor($session, 0)));
+        $this->assertSame(8, $session->fresh()->received_bytes);
+    }
+
+    public function test_a_persistent_rate_limit_is_reported_as_retryable(): void
+    {
+        $fake = $this->useDropbox();
+
+        $fake->failAlways('files/create_folder_v2', [
+            'error' => [
+                'reason' => ['.tag' => 'too_many_write_operations'],
+                'retry_after' => 0,
+            ],
+            'error_summary' => '',
+        ], 409);
+
+        $user = $this->makeUploader();
+        $space = $this->makePersonalSpace($user);
+        $session = $this->beginUpload($user, $space, null, 20);
+
+        try {
+            $this->uploadService()->putChunk($session, $user, 0, $this->makeChunk(8));
+            $this->fail('A persistent rate limit must be reported.');
+        } catch (StorageUnavailableException $e) {
+            // The admin sees the tag, not the raw JSON body.
+            $this->assertStringContainsString('too_many_write_operations', $e->getMessage());
+        }
+
+        $this->assertSame(0, $session->fresh()->received_bytes);
+        $this->assertDatabaseCount('upload_chunks', 0);
+    }
+
+    public function test_dropbox_upload_sessions_use_the_cursor_and_commit_arguments(): void
+    {
+        $arguments = [];
+
+        Http::fake(function (\Illuminate\Http\Client\Request $request) use (&$arguments) {
+            $url = $request->url();
+
+            if (str_contains($url, '/oauth2/token')) {
+                return Http::response(['access_token' => 'token', 'expires_in' => 3600]);
+            }
+
+            $header = $request->header('Dropbox-API-Arg')[0] ?? '{}';
+            $argument = json_decode($header, true);
+            $endpoint = \Illuminate\Support\Str::afterLast(parse_url($url, PHP_URL_PATH) ?: '', '/2/');
+            $arguments[$endpoint] = is_array($argument) ? $argument : [];
+
+            if ($endpoint === 'files/get_metadata') {
+                return Http::response(['.tag' => 'folder', 'name' => 'edms']);
+            }
+
+            if ($endpoint === 'files/upload_session/start') {
+                return Http::response(['session_id' => 'session-1']);
+            }
+
+            return Http::response([]);
+        });
+
+        $chunk = tempnam(sys_get_temp_dir(), 'edms-chunk-');
+        $empty = tempnam(sys_get_temp_dir(), 'edms-empty-');
+        file_put_contents($chunk, 'abc');
+
+        try {
+            $client = new DropboxClient('key', 'secret', 'refresh', '/edms', 30);
+
+            $client->startUploadSession();
+            $client->appendToSession('session-1', 0, $chunk);
+            $client->finishUploadSession('session-1', 3, 'final.bin', $empty);
+        } finally {
+            @unlink($chunk);
+            @unlink($empty);
+        }
+
+        $this->assertSame('session-1', $arguments['files/upload_session/append_v2']['cursor']['session_id']);
+        $this->assertSame(0, $arguments['files/upload_session/append_v2']['cursor']['offset']);
+
+        $this->assertSame('session-1', $arguments['files/upload_session/finish']['cursor']['session_id']);
+        $this->assertSame(3, $arguments['files/upload_session/finish']['cursor']['offset']);
+        $this->assertSame('/edms/final.bin', $arguments['files/upload_session/finish']['commit']['path']);
     }
 
     public function test_dropbox_rpc_requests_send_a_json_object_body(): void
