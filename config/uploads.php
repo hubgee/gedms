@@ -19,6 +19,10 @@ return [
     |           max_execution_time = 0
     |   Nginx : client_max_body_size = 25m, fastcgi_read_timeout = 600s
     |
+    | The browser session must outlast the upload, or the CSRF token expires
+    | mid-transfer and every remaining chunk returns 419. SESSION_LIFETIME is
+    | therefore 480 minutes (8 hours) in .env.example.
+    |
     | The final assembly runs on the dedicated "uploads" queue connection
     | (config/queue.php) whose retry_after is deliberately long, so a worker is
     | never interrupted mid-concatenation. Run it with:

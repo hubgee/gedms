@@ -22,9 +22,9 @@ const DEFAULTS = {
     /** Chunks in flight per file. Keep in sync with config('uploads.concurrency'). */
     concurrency: 2,
     /** Attempts per chunk (1 try + retries). */
-    maxAttempts: 5,
+    maxAttempts: 10,
     baseDelayMs: 1000,
-    maxDelayMs: 15000,
+    maxDelayMs: 30000,
     /** Assembly polling (the job runs on a queue). */
     pollIntervalMs: 2000,
     // 10 minutes. Cloud assembly downloads and re-uploads every chunk, so a
@@ -99,13 +99,13 @@ function messageFrom(payload, status) {
 
     switch (status) {
         case 401:
-            return 'Your session has expired. Refresh the page and try again.';
+            return 'Your session expired. Sign in again, then reselect the same file to resume.';
         case 403:
             return 'You do not have permission to upload into this location.';
         case 413:
             return 'The server rejected this chunk as too large. Check the PHP upload limits.';
         case 419:
-            return 'Your session expired (CSRF token). Refresh the page and try again.';
+            return 'Your session expired. Sign in again, then reselect the same file to resume.';
         case 422:
             return 'The upload was rejected by the server.';
         case 507:
@@ -708,6 +708,12 @@ class UploadQueue {
                             const uploadError = toUploadError(error);
                             job.error = uploadError;
                             job.set('failed');
+
+                            // A fatal error (expired session, quota, validation)
+                            // fails every sibling chunk the same way. Stop the
+                            // in-flight requests instead of letting them pile up
+                            // 419/503 responses in the console.
+                            job.cancel();
                         }
                     }
                 }
